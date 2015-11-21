@@ -307,7 +307,7 @@ module ASM
             nic = nics.find do |n|
               nic_prefixes ||= ordered_nic_prefixes(nics)
               prefix = nic_prefixes[card.card_index] or raise("No slot found for card_index #{card.card_index} in #{nic_prefixes}")
-              (n.fqdd.start_with?(prefix) &&
+              (n.card_prefix == prefix &&
                   name_to_port(interface.name).to_s == n.port &&
                   partition_no.to_s == n.partition_no)
             end

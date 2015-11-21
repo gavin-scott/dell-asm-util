@@ -135,7 +135,6 @@ describe ASM::NetworkConfiguration do
 
   end
 
-
   describe 'when parsing a partitioned network config' do
     let (:json) { SpecHelper.load_fixture("network_configuration/blade_partitioned.json") }
     let (:net_config) { ASM::NetworkConfiguration.new(JSON.parse(json)) }
@@ -640,6 +639,29 @@ describe ASM::NetworkConfiguration do
           end
         end
       end
+    end
+
+    it "should prefer embedded NICs" do
+      fqdd_to_mac = {"NIC.Mezzanine.1A-1" => "00:8C:FA:F1:CC:8E",
+                     "NIC.Mezzanine.1A-2" => "00:8C:FA:F1:CC:8F",
+                     "NIC.Embedded.1-1-1" => "00:8C:FA:F0:6F:5A",
+                     "NIC.Embedded.2-1-1" => "00:8C:FA:F0:6F:5C"}
+
+      net_config.cards = [net_config.cards.first] # only have 1 2-port NIC config
+      ASM::WsMan.stubs(:get_mac_addresses).returns(fqdd_to_mac)
+      net_config.add_nics!(Hashie::Mash.new({:host => '127.0.0.1'}))
+      expect(net_config.cards.size).to eq(1)
+      expect(net_config.cards[0].interfaces.size).to eq(2)
+      expect(net_config.cards[0].interfaces[0].partitions.size).to eq(1)
+      expect(net_config.cards[0].interfaces[1].partitions.size).to eq(1)
+
+      expected_fqdd = "NIC.Embedded.1-1-1"
+      expect(net_config.cards[0].interfaces[0].partitions[0].fqdd).to eq(expected_fqdd)
+      expect(net_config.cards[0].interfaces[0].partitions[0].mac_address).to eq(fqdd_to_mac[expected_fqdd])
+
+      expected_fqdd = "NIC.Embedded.2-1-1"
+      expect(net_config.cards[0].interfaces[1].partitions[0].fqdd).to eq(expected_fqdd)
+      expect(net_config.cards[0].interfaces[1].partitions[0].mac_address).to eq(fqdd_to_mac[expected_fqdd])
     end
   end
 

@@ -35,7 +35,7 @@ module ASM
             logger.warn("Mismatched fabric information for #{orig_card}: #{ret.fabric} versus #{expected_fabric}") if logger
           end
         else
-          if ret.type == 'Embedded'
+          if ret.type == 'Embedded' && Integer(ret.card) > 1
             ret.port = ret.card
             ret.card = '1'
           end
