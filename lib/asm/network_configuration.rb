@@ -243,6 +243,14 @@ module ASM
       end
     end
 
+    def n_partitions(card)
+      ns = card.interfaces.map { |i| i.partitions.size }.uniq
+      return 0 if ns.empty?
+      return ns.first if ns.size == 1
+      raise("Different number of partitions requested for orts on %s: %s" %
+                [card.name, card.interfaces.map { |i| "Interface: %s # partitions: %d" % [i.name, i.partitions.size] }.join(", ")])
+    end
+
     # Add nic, fqdd and mac_address fields to the partition data. This info
     # is obtained by calling WsMan to get the NicInfo.
     #
@@ -262,7 +270,7 @@ module ASM
 
       missing = []
       cards.each do |card|
-        index = nics.find_index { |n| card.nictype.nictype == n.nic_type }
+        index = nics.find_index { |n| n.nic_type == card.nictype.nictype && n.n_partitions >= n_partitions(card) }
         if index.nil?
           missing << card
         else
@@ -276,7 +284,6 @@ module ASM
                 partition.mac_address = nic_partition.nic_view["CurrentMACAddress"]
               elsif partition_no > 1 && options[:add_partitions]
                 first_partition = nic.find_partition(name_to_port(interface.name).to_s , "1")
-                fake_partition = first_partition.create_with_partition(partition_no)
                 partition.fqdd = first_partition.create_with_partition(partition_no).fqdd
               end
             end
@@ -285,11 +292,10 @@ module ASM
       end
 
       # TODO: better error messaging
-      raise("Missing NICs for %s" % missing) unless missing.empty?
-
-      # TODO: check if we're missing macs for non-primary partitions and !add_partitions?
-
-      nil
+      unless missing.empty?
+        # foo
+        raise("Missing NICs for %s" % missing.map { |card| "%s (%s)" % [card.name, card.nictype.nictype] }.join(", "))
+      end
     end
 
     #resets virtual mac addresses of partitions to their permanent mac address

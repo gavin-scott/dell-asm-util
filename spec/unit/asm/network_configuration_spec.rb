@@ -135,12 +135,14 @@ describe ASM::NetworkConfiguration do
 
   end
 
-  def build_nic_views(fqdd_to_mac)
+  def build_nic_views(fqdd_to_mac, vendor = nil, product = nil)
     fqdd_to_mac.keys.map do |fqdd|
       mac = fqdd_to_mac[fqdd]
       nic_view = {"FQDD" => fqdd, "PermanentMACAddress" => mac, "CurrentMACAddress" => mac}
       unless block_given? && yield(nic_view)
         nic_view["LinkSpeed"] = "5"
+        nic_view["VendorName"] = vendor if vendor
+        nic_view["ProductName"] = product if product
       end
       nic_view
     end
@@ -192,7 +194,7 @@ describe ASM::NetworkConfiguration do
                      'NIC.Integrated.1-2-3' => '00:0E:1E:0D:8C:35',
                      'NIC.Integrated.1-2-4' => '00:0E:1E:0D:8C:37',
       }
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57810"))
       net_config.add_nics!(Hashie::Mash.new(:host => '127.0.0.1'))
       card = net_config.cards.first
 
@@ -221,7 +223,7 @@ describe ASM::NetworkConfiguration do
       fqdd_to_mac = {'NIC.Integrated.1-1-1' => '00:0E:1E:0D:8C:30',
                      'NIC.Integrated.1-2-1' => '00:0E:1E:0D:8C:31',
       }
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57810"))
       net_config.add_nics!(Hashie::Mash.new(:host => '127.0.0.1'), :add_partitions => true)
       card = net_config.cards.first
 
@@ -306,7 +308,7 @@ describe ASM::NetworkConfiguration do
                      'NIC.Integrated.1-2-3' => '00:0E:1E:0D:8C:35',
                      'NIC.Integrated.1-2-4' => '00:0E:1E:0D:8C:37',
       }
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57810"))
       net_config.add_nics!(Hashie::Mash.new(:host => '127.0.0.1'))
       partitions = net_config.get_partitions('STORAGE_ISCSI_SAN')
       partitions.size.should == 2
@@ -426,7 +428,7 @@ describe ASM::NetworkConfiguration do
                      'NIC.Slot.2-2-3' => '00:0A:F7:06:88:5A',
                      'NIC.Slot.2-2-4' => '00:0A:F7:06:88:5E'}
 
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57810"))
       net_config.add_nics!(Hashie::Mash.new({:host => '127.0.0.1'}))
 
       # Verify
@@ -456,7 +458,7 @@ describe ASM::NetworkConfiguration do
         nic_view["ProductName"] = "unknown"
         nic_view["LinkSpeed"] = "5"
       end
-      ASM::WsMan.stubs(:get_nic_view).returns(nic_views)
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57810"))
       net_config.add_nics!(Hashie::Mash.new({:host => '127.0.0.1'}))
       ASM::WsMan.unstub(:get_nic_view)
 
@@ -502,7 +504,7 @@ describe ASM::NetworkConfiguration do
                      'NIC.Integrated.1-4-1' => '00:0A:F7:06:9D:CA',
                      'NIC.Integrated.1-4-2' => '00:0A:F7:06:9D:CE', }
 
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57840"))
 
       net_config.add_nics!(Hashie::Mash.new({:host => '127.0.0.1'}), :add_partitions => true)
       net_config.cards.size.should == 1
@@ -525,7 +527,7 @@ describe ASM::NetworkConfiguration do
                      'NIC.Integrated.1-3-1' => '00:0A:F7:06:9D:C2',
                      'NIC.Integrated.1-4-1' => '00:0A:F7:06:9D:CA', }
 
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57840"))
       net_config = ASM::NetworkConfiguration.new(JSON.parse(json), :add_partitions)
 
       net_config.add_nics!(Hashie::Mash.new({:host => '127.0.0.1'}), :add_partitions => true)
@@ -743,6 +745,9 @@ describe ASM::NetworkConfiguration do
         if nic_view["FQDD"] =~ /Integrated/
           nic_view["VendorName"] = "Broadcom"
           nic_view["ProductName"] = "57800"
+        else
+          nic_view["VendorName"] = "Broadcom"
+          nic_view["ProductName"] = "57810"
         end
       end
       ASM::WsMan.stubs(:get_nic_view).returns(nic_views)
@@ -802,7 +807,7 @@ describe ASM::NetworkConfiguration do
                      'NIC.Integrated.1-2-3' => '00:0A:F7:06:88:5A',
                      'NIC.Integrated.1-2-4' => '00:0A:F7:06:88:5E'}
 
-      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac))
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac, "Broadcom", "57810"))
       net_config.add_nics!(Hashie::Mash.new(:host => '127.0.0.1'))
 
       output = [{:networks=>[{"id"=>"ff80808146056aa20146057c08e503a1",

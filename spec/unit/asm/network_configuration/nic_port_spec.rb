@@ -3,8 +3,9 @@ require 'asm/network_configuration/nic_info'
 require 'asm/network_configuration/nic_port'
 
 describe ASM::NetworkConfiguration::NicPort do
+  let(:logger) { stub(:debug => nil, :warn => nil, :info => nil, :error => nil) }
+
   describe "NicPort.new" do
-    let(:logger) { stub(:debug => nil, :warn => nil, :info => nil, :error => nil) }
     let (:endpoint) { mock("rspec-endpoint") }
 
     it "should use LinkSpeed for 10Gbps NIC" do
@@ -68,7 +69,7 @@ describe ASM::NetworkConfiguration::NicPort do
                   "ProductName" => "57810"}
       nic_info = ASM::NetworkConfiguration::NicInfo.new(nic_view)
       port = ASM::NetworkConfiguration::NicPort.new(nic_info, 4, logger)
-      expect(port.link_speed).to eq("unknown")
+      expect(port.link_speed).to eq("Unknown")
     end
 
     it "should override Broadcom 57840 LinkSpeed for port 3 of 4-port NIC to 10 Gbps" do
@@ -90,7 +91,7 @@ describe ASM::NetworkConfiguration::NicPort do
                   "ProductName" => "57840"}
       nic_info = ASM::NetworkConfiguration::NicInfo.new(nic_view)
       port = ASM::NetworkConfiguration::NicPort.new(nic_info, 2, logger)
-      expect(port.link_speed).to eq("unknown")
+      expect(port.link_speed).to eq("Unknown")
     end
 
     it "should override Intel X520 LinkSpeed for port 2 of 2-port NIC to 10 Gbps" do
@@ -123,7 +124,31 @@ describe ASM::NetworkConfiguration::NicPort do
                   "ProductName" => "X520"}
       nic_info = ASM::NetworkConfiguration::NicInfo.new(nic_view)
       port = ASM::NetworkConfiguration::NicPort.new(nic_info, 4, logger)
-      expect(port.link_speed).to eq("unknown")
+      expect(port.link_speed).to eq("Unknown")
+    end
+  end
+
+  describe "#n_partitions" do
+    let (:nic_info) { ASM::NetworkConfiguration::NicInfo.new({"FQDD" => "NIC.Integrated.1-1-1"}) }
+    let (:nic_port) { ASM::NetworkConfiguration::NicPort.new(nic_info, 2, logger) }
+
+    it "should return 2 for QLogic 57800" do
+      nic_port.expects(:is_qlogic_57800?).returns(true)
+      expect(nic_port.n_partitions).to eq(2)
+    end
+
+    it "should return 4 for QLogic 57810" do
+      nic_port.expects(:is_qlogic_57810?).returns(true)
+      expect(nic_port.n_partitions).to eq(4)
+    end
+
+    it "should return 2 for QLogic 57840" do
+      nic_port.expects(:is_qlogic_57840?).returns(true)
+      expect(nic_port.n_partitions).to eq(2)
+    end
+
+    it "should return 1 otherwise" do
+      expect(nic_port.n_partitions).to eq(1)
     end
   end
 end

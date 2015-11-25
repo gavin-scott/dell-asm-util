@@ -43,12 +43,21 @@ module ASM
       end
 
       def nic_type
-        return "2x10Gb" if @ports.size == 2 && all_ports?(@ports, "10 Gbps")
-        return "2x1Gb" if @ports.size == 2 && all_ports?(@ports, "1 Gbps")
-        return "4x10Gb" if @ports.size == 4 && all_ports?(@ports, "10 Gbps")
-        return "4x1Gb" if @ports.size == 4 && all_ports?(@ports, "1 Gbps")
-        return "2x10Gb,2x1Gb" if @ports.size == 4 && all_ports?(@ports.slice(0, 2), "10 Gbps") && all_ports?(@ports.slice(2, 4), "1 Gbps")
+        return "2x10Gb" if ports.size == 2 && all_ports?(ports, "10 Gbps")
+        return "2x1Gb" if ports.size == 2 && all_ports?(ports, "1 Gbps")
+        return "4x10Gb" if ports.size == 4 && all_ports?(ports, "10 Gbps")
+        return "4x1Gb" if ports.size == 4 && all_ports?(ports, "1 Gbps")
+        return "2x10Gb,2x1Gb" if ports.size == 4 && all_ports?(ports.slice(0, 2), "10 Gbps") && all_ports?(ports.slice(2, 4), "1 Gbps")
         "unknown"
+      end
+
+      def n_partitions
+        ports_10gb = ports.find_all { |port| port.link_speed == "10 Gbps" }
+        ns = ports_10gb.map { |port| port.n_partitions }.uniq
+        return 0 if ns.empty?
+        return ns.first if ns.size == 1
+        raise("Different 10Gb NIC ports on %s reported different number of partitions: %s" %
+                  [card_prefix, ports_10gb.map { |p| "NIC: %s # partitions: %s" % [p.model, p.n_partitions] }.join(", ")])
       end
 
       def find_partition(port, partition)
