@@ -247,7 +247,7 @@ module ASM
       ns = card.interfaces.map { |i| i.partitions.size }.uniq
       return 0 if ns.empty?
       return ns.first if ns.size == 1
-      raise("Different number of partitions requested for orts on %s: %s" %
+      raise("Different number of partitions requested for ports on %s: %s" %
                 [card.name, card.interfaces.map { |i| "Interface: %s # partitions: %d" % [i.name, i.partitions.size] }.join(", ")])
     end
 
@@ -262,15 +262,14 @@ module ASM
     # nics are not currently partitioned.
     def add_nics!(endpoint, options = {})
       options = {:add_partitions => false}.merge(options)
-      nic_views = ASM::WsMan.get_nic_view(endpoint, logger)
-      nics = NicCapabilities.create(nic_views)
+      nics = NicCapabilities.fetch(endpoint, logger)
 
       # Instance variable to track, add_nics! is invoked
       @network_config_add_nic = true
 
       missing = []
       cards.each do |card|
-        index = nics.find_index { |n| n.nic_type == card.nictype.nictype && n.n_partitions >= n_partitions(card) }
+        index = nics.find_index { |n| !n.disabled? && n.nic_type == card.nictype.nictype && n.n_partitions >= n_partitions(card) }
         if index.nil?
           missing << card
         else
@@ -291,10 +290,11 @@ module ASM
         end
       end
 
-      # TODO: better error messaging
       unless missing.empty?
-        # foo
-        raise("Missing NICs for %s" % missing.map { |card| "%s (%s)" % [card.name, card.nictype.nictype] }.join(", "))
+        card_list = missing.map { |card| "%s (%s)" % [card.name, card.nictype.nictype] }.join(", ")
+        available_list = "available: %s" % nics.map { |nic| "%s (%s%s)" %
+            [nic.card_prefix, nic.nic_type, !nic.disabled? ? "" : ", disabled"] }.join(", ")
+        raise("Missing NICs for %s; %s" % [card_list, nics.empty? ? "none found" : available_list])
       end
     end
 

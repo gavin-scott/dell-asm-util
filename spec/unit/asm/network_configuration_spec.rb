@@ -5,6 +5,7 @@ describe ASM::NetworkConfiguration do
 
   before do
     SpecHelper.init_i18n
+    ASM::WsMan.stubs(:get_bios_enumeration).returns([])
   end
 
   describe 'when parsing NIC FQDDs' do
@@ -216,7 +217,21 @@ describe ASM::NetworkConfiguration do
       endpoint.host = '127.0.0.1'
       expect do
         net_config.add_nics!(endpoint)
-      end.to raise_error
+      end.to raise_error("Missing NICs for Interface (2x10Gb); none found")
+    end
+
+    it 'should fail if wrong NIC found' do
+      fqdd_to_mac = {'NIC.Integrated.1-1-1' => '00:0E:1E:0D:8C:30',
+                     'NIC.Integrated.1-2-1' => '00:0E:1E:0D:8C:31',
+      }
+      ASM::WsMan.stubs(:get_nic_view).returns(build_nic_views(fqdd_to_mac) do |nic_view|
+        nic_view["LinkSpeed"] = "3" # 1 Gbps, not supported
+      end)
+      endpoint = Hashie::Mash.new
+      endpoint.host = '127.0.0.1'
+      expect do
+        net_config.add_nics!(endpoint)
+      end.to raise_error("Missing NICs for Interface (2x10Gb); available: NIC.Integrated.1 (2x1Gb)")
     end
 
     it 'should be able to generate missing partitions' do

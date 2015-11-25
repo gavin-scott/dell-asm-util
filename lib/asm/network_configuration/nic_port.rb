@@ -2,11 +2,6 @@ module ASM
   class NetworkConfiguration
     class NicPort
 
-      # [Description ("Link Speed."),
-      #              ValueMap { "0", "1", "2", "3", "4", "5", "6", "7", "8"},
-      #              Values { "Unknown", "10 Mbps", "100 Mbps", "1000 Mbps",
-      #                  "2.5 Gbps", "10 Gbps", "20 Gbps", "40 Gbps", "100 Gbps" }]
-      # uint8 LinkSpeed;
       LINK_SPEEDS = [ "Unknown", "10 Mbps", "100 Mbps", "1000 Mbps", "2.5 Gbps", "10 Gbps", "20 Gbps", "40 Gbps", "100 Gbps" ]
 
       attr_reader :link_speed, :n_ports, :nic_info
