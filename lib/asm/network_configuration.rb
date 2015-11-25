@@ -4,6 +4,7 @@ require 'asm/translatable'
 require 'hashie'
 require 'asm/network_configuration/nic_info'
 require 'asm/network_configuration/nic_type'
+require 'asm/network_configuration/nic_capabilities'
 
 module ASM
   # The NetworkConfiguration class is a wrapper class to make it easier to work
@@ -242,40 +243,6 @@ module ASM
       end
     end
 
-    # Returns an ordered list prefixes of the cards contained in the nics.
-    # Ordering is done by type and then card number.
-    #
-    # For rack servers this order is lined up with the order of cards passed
-    # in the network configuration data in order to match physical nics to
-    # that data.
-    def ordered_nic_prefixes(nics)
-      prefixes = nics.sort { |a, b| compare_cards(a, b) }.collect do |nic|
-        nic.card_prefix
-      end.uniq
-
-      # Ensure that Integrated comes first
-      if prefixes.include?("NIC.Integrated.1") and prefixes[0] != "NIC.Integrated.1"
-        integrated_index = prefixes.index("NIC.Integrated.1")
-        prefixes.delete_at(integrated_index)
-        prefixes.insert(0,"NIC.Integrated.1")
-      else
-        # Or Embedded comes first
-        if prefixes.include?("NIC.Embedded.1") and prefixes[0] != "NIC.Embedded.1"
-          integrated_index = prefixes.index("NIC.Embedded.1")
-          prefixes.delete_at(integrated_index)
-          prefixes.insert(0,"NIC.Embedded.1")
-        end
-      end
-
-      if prefixes.size >= cards.size
-        prefixes.slice(0, cards.size + 1)
-      else
-        fqdds = nics.collect { |nic| nic.fqdd }
-        logger.debug("Found nic fqdd's: #{fqdds}") if logger
-        raise(ASM::UserException, t(:ASM017, "Network configuration requires %{expected_count} network cards but only %{actual_count} were found", :expected_count => cards.size, :actual_count => prefixes.size))
-      end
-    end
-
     # Add nic, fqdd and mac_address fields to the partition data. This info
     # is obtained by calling WsMan to get the NicInfo.
     #
@@ -287,58 +254,42 @@ module ASM
     # nics are not currently partitioned.
     def add_nics!(endpoint, options = {})
       options = {:add_partitions => false}.merge(options)
-      nics = get_wsman_nic_info(endpoint)
-      if nics.empty?
-        logger.debug("NICs Info is empty") if logger
-        # Calling the NICS view again
-        sleep(60)
-        nics = get_wsman_nic_info(endpoint)
-      end
-      nic_prefixes = nil
+      nic_views = ASM::WsMan.get_nic_view(endpoint, logger)
+      nics = NicCapabilities.create(nic_views)
 
       # Instance variable to track, add_nics! is invoked
       @network_config_add_nic = true
 
+      missing = []
       cards.each do |card|
-        card.interfaces.each do |interface|
-          interface.partitions.each do |partition|
-            partition_no = name_to_partition(partition.name)
-            nic_prefixes ||= ordered_nic_prefixes(nics)
-            nic = nics.find do |n|
-              nic_prefixes ||= ordered_nic_prefixes(nics)
-              prefix = nic_prefixes[card.card_index] or raise("No slot found for card_index #{card.card_index} in #{nic_prefixes}")
-              (n.fqdd.start_with?(prefix) &&
-                  name_to_port(interface.name).to_s == n.port &&
-                  partition_no.to_s == n.partition_no)
+        index = nics.find_index { |n| card.nictype.nictype == n.nic_type }
+        if index.nil?
+          missing << card
+        else
+          nic = nics.delete_at(index)
+          card.interfaces.each do |interface|
+            interface.partitions.each do |partition|
+              partition_no = name_to_partition(partition.name)
+              nic_partition = nic.find_partition(name_to_port(interface.name).to_s , partition_no.to_s)
+              if nic_partition
+                partition.fqdd = nic_partition.nic_view["FQDD"]
+                partition.mac_address = nic_partition.nic_view["CurrentMACAddress"]
+              elsif partition_no > 1 && options[:add_partitions]
+                first_partition = nic.find_partition(name_to_port(interface.name).to_s , "1")
+                fake_partition = first_partition.create_with_partition(partition_no)
+                partition.fqdd = first_partition.create_with_partition(partition_no).fqdd
+              end
             end
-
-            if nic.nil? && options[:add_partitions]
-              first_nic = interface.partitions.first.nic
-              nic = first_nic.create_with_partition(partition_no) if first_nic
-            end
-
-            unless nic
-              msg = "Mac address not found on #{endpoint.host} for #{card.name} #{interface.name} partition #{partition.name}"
-              raise(msg)
-            end
-
-            partition.nic = nic
-            partition.fqdd = nic.fqdd
-            partition.mac_address = nic.mac_address
           end
         end
       end
 
-      # Remove the NicInfo partition field. It is a Hashie::Mash and will cause
-      # problems with yaml de-serialization later in the puppet layer
-      cards.each do |fabric|
-        fabric.interfaces.each do |port|
-          port.partitions.each do |partition|
-            partition.delete('nic')
-          end
-        end
-      end.flatten
+      # TODO: better error messaging
+      raise("Missing NICs for %s" % missing) unless missing.empty?
 
+      # TODO: check if we're missing macs for non-primary partitions and !add_partitions?
+
+      nil
     end
 
     #resets virtual mac addresses of partitions to their permanent mac address

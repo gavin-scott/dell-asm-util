@@ -1,7 +1,17 @@
+require "hashie"
+
 module ASM
   class NetworkConfiguration
     class NicInfo
+      include Comparable
+
+      attr_accessor :nic_view
+
       def initialize(fqdd, logger = nil)
+        if fqdd.is_a?(Hash)
+          @nic_view = fqdd
+          fqdd = fqdd["FQDD"]
+        end
         @mash = parse_fqdd(fqdd, logger)
       end
 
@@ -46,6 +56,24 @@ module ASM
 
       def card_prefix
         "NIC.#{@mash.type}.#{@mash.card}"
+      end
+
+      def to_s
+        "#<ASM::NetworkConfiguration::NicInfo fqdd: %s>" % fqdd
+      end
+
+      def <=>(other)
+        ret = self.type <=> other.type
+        if ret == 0
+          ret = Integer(self.card) <=> Integer(other.card)
+          if ret == 0
+            ret = Integer(self.port) <=> Integer(other.port)
+            if ret == 0
+              ret = Integer(self.partition_no) <=> Integer(other.partition_no)
+            end
+          end
+        end
+        ret
       end
     end
   end
