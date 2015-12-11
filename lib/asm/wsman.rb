@@ -406,6 +406,89 @@ module ASM
       raise(Error, "Timed out waiting for ISO to boot")
     end
 
+    def self.camel_case(str, options = {})
+      options = {:capitalize => false}.merge(options)
+      ret = str.gsub(/_(.)/) {|e| $1.upcase}
+      ret[0] = ret[0].upcase if options[:capitalize]
+      ret
+    end
+
+    def self.snake_case(str)
+      str.gsub(/([A-Z])/) {|e| "_%s" % $1.downcase}
+    end
+
+    # Return the
+    def self.enum_value(key, enum, value)
+      return enum[value] if enum[value]
+      return value if enum.values.include?(value)
+      allowed = enum.keys.map { |k| "%s (%s)" % [k.inspect, enum[k]]}.join(", ")
+      raise("Invalid %s value: %s; allowed values are: %s" % [key.to_s, value, allowed])
+    end
+
+    # Convert known wsman properties to their expected format
+    #
+    # Converts known enum keys such as :share_type and :hash_type to their value.
+    # Value is returned unmodified for other keys.
+    #
+    # @api private
+    # @param key [Symbol] the property key, such as :share_type or :hash_type
+    # @return [String]
+    # @raise [StandardError] if an enum key has an unknown value
+    def self.wsman_value(key, value)
+      case key
+        when :share_type
+          enum_value(:share_type, {:nfs => "0", :cifs => "2"}, value)
+        when :hash_type
+          enum_value(:hash_type, {:md5 => "1", :sha1 => "2"}, value)
+        else
+          value
+      end
+    end
+
+    # Connect a network ISO as a virtual CD-ROM
+    #
+    # @param endpoint [Hash]
+    # @option endpoint [String] :host the iDrac host
+    # @option endpoint [String] :user the iDrac user
+    # @option endpoint [String] :password the iDrac password
+    # @param options [Hash] The inventory options
+    # @option options [Logger] :logger a logger to use
+    # @option options [String] :ip_address CIFS or NFS share IPv4 address. For example, 192.168.10.100. Required.
+    # @option options [String] :share_name NFS or CIFS network share point. For example, "/home/guest" or “guest_smb.”. Required.
+    # @option options [String] :image_name ISO image name. Required.
+    # @option options [String|Fixnum] :share_type share type. 0 or :nfs for NFS and 2 or :cifs for CIFS. Required.
+    # @option options [String] :workgroup workgroup name, if applicable
+    # @option options [String] :user_name user name, if applicable.
+    # @option options [String] :password password, if applicable
+    # @option options [String] :hash_type type of hash algorithm used to compute checksum: 1 or :md5 for MD5 and 2 or :sha1 for SHA1
+    # @option options [String] :hash_value checksum value in string format computed using HashType algorithm
+    # @option options [String] :auto_connect auto-connect to ISO image up on iDRAC reset
+    # @return [void]
+    # @raise [StandardError] if required parameters are not passed or if the command fails
+    def self.connect_network_iso_image(endpoint, options = {})
+      required_api_params = [:ip_address, :share_name, :share_type, :image_name]
+      optional_api_pararms = [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect]
+      missing_params = required_api_params.reject { |k| options.include?(k) }
+      raise("Missing required parameter(s): %s" % missing_params.join(", ")) unless missing_params.empty?
+
+      logger = options.delete(:logger)
+      unknown_params = options.reject { |k| (required_api_params + optional_api_pararms).include?(k) }
+      raise("Unknown parameter(s): %s" % unknown_params.keys.join(", ")) unless unknown_params.empty?
+
+      props = options.keys.inject({}) do |acc, key|
+        acc[camel_case(key.to_s, :capitalize => true)] = wsman_value(key, options[key])
+        acc
+      end
+      resp = invoke(endpoint, "ConnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA,
+                    :logger => logger, :props => props, :selector => "//n1:ReturnValue")
+      if resp == "4096"
+        logger.info("Successfully attached network ISO. Started CIM_ConcreteJob.")
+      else
+        raise(Error, "Could not connect network ISO. Error code: #{resp}")
+      end
+      nil
+    end
+
     # This function will exit when the LC status is 0, or a puppet error will be raised if the LC status never is 0 (never stops being busy)
     def self.wait_for_lc_ready(endpoint, logger = nil, attempts=0, max_attempts=30)
       if(attempts > max_attempts)
