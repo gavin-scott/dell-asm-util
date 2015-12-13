@@ -71,6 +71,67 @@ describe ASM::WsMan do
     end
   end
 
+  describe "#response_string" do
+    it "should display message" do
+      resp = {:lcstatus => "5",
+              :message => "Lifecycle Controller Remote Services is not ready."}
+      expect(ASM::WsMan.response_string(resp)).to eq("Lifecycle Controller Remote Services is not ready. [lcstatus: 5]")
+    end
+  end
+
+  describe "ResponseError#to_s" do
+    it "should display message" do
+      e = ASM::WsMan::ResponseError.new("Exception message", {:message => "ws-man message", :message_id => "4"})
+      expect(e.to_s).to eq("Exception message: ws-man message [message_id: 4]")
+    end
+
+    it "should display fault reason" do
+      e = ASM::WsMan::ResponseError.new("Exception message", {:reason => "ws-man fault reason", :message_id => "4"})
+      expect(e.to_s).to eq("Exception message: ws-man fault reason [message_id: 4]")
+    end
+
+    it "should prefer message to fault reason" do
+      resp = {:message => "ws-man message", :reason => "ws-man fault reason", :message_id => "4"}
+      e = ASM::WsMan::ResponseError.new("Exception message", resp)
+      expect(e.to_s).to eq("Exception message: ws-man message [reason: ws-man fault reason, message_id: 4]")
+    end
+  end
+
+  describe "#parse" do
+    let(:connect_network_iso_response) { SpecHelper.load_fixture("wsman/connect_network_iso.xml") }
+    let(:get_attach_status_response) { SpecHelper.load_fixture("wsman/get_attach_status.xml") }
+    let(:fault_response) { SpecHelper.load_fixture("wsman/fault.xml") }
+    let(:osd_concrete_job) { SpecHelper.load_fixture("wsman/osd_concrete_job.xml") }
+
+    it "should parse simple responses" do
+      expect(ASM::WsMan.parse(get_attach_status_response)).to eq({:return_value => "0"})
+    end
+
+    it "should parse job status responses" do
+      expected = {:job => "DCIM_OSDConcreteJob:1",
+                  :return_value => "4096"}
+      expect(ASM::WsMan.parse(connect_network_iso_response)).to eq(expected)
+    end
+
+    it "should parse faults" do
+      expected = {:code => "wsman:InvalidParameter",
+                  :reason => "CMPI_RC_ERR_INVALID_PARAMETER",
+                  :detail => "http://schemas.dmtf.org/wbem/wsman/1/wsman/faultDetail/MissingValues"}
+      expect(ASM::WsMan.parse(fault_response)).to eq(expected)
+    end
+
+    it "should parse xsi:nil elements" do
+      expected = {:delete_on_completion => "false",
+                  :instance_id => "DCIM_OSDConcreteJob:1",
+                  :job_name => "BootToNetworkISO",
+                  :job_status => "Rebooting to ISO",
+                  :message => nil,
+                  :message_id => nil,
+                  :name => "BootToNetworkISO"}
+      expect(ASM::WsMan.parse(osd_concrete_job)).to eq(expected)
+    end
+  end
+
   describe "#detach_network_iso" do
     it "should invoke DetachIISOImage" do
       ASM::WsMan.expects(:invoke).with(endpoint, "DetachISOImage", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA, :logger => logger)
@@ -139,6 +200,31 @@ describe ASM::WsMan do
     it "should lower-case and add underscore before 2nd and greater words" do
       expect(ASM::WsMan.snake_case("fooBarBaz")).to eq("foo_bar_baz")
     end
+
+    it "should not begin with an underscore if original did not" do
+      expect(ASM::WsMan.snake_case("ReturnValue")).to eq("return_value")
+    end
+
+    it "should begin with an underscore if original value did" do
+      expect(ASM::WsMan.snake_case("__cimnamespace")).to eq("__cimnamespace")
+    end
+
+    it "should treat multiple capitalized characters as a single word" do
+      expect(ASM::WsMan.snake_case("JobID")).to eq("job_id")
+    end
+
+    it "should handle ISO as a single word" do
+      expect(ASM::WsMan.snake_case("ISOAttachStatus")).to eq("iso_attach_status")
+    end
+
+    it "should handle fcoe and wwnn as single words" do
+      expect(ASM::WsMan.snake_case("FCoEWWNN")).to eq("fcoe_wwnn")
+    end
+
+    it "should handle MAC as a single word" do
+      expect(ASM::WsMan.snake_case("PermanentFCOEMACAddress")).to eq("permanent_fcoe_mac_address")
+    end
+
   end
 
   describe "#enum_value" do
