@@ -5,6 +5,7 @@ require "rexml/document"
 require "hashie"
 require "nokogiri"
 require "logger"
+require "uri"
 
 module ASM
   module WsMan
@@ -44,6 +45,7 @@ module ASM
     end
 
     # rubocop:disable Metrics/LineLength
+    BIOS_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_BIOSService?SystemCreationClassName=DCIM_ComputerSystem,CreationClassName=DCIM_BIOSService,SystemName=DCIM:ComputerSystem,Name=DCIM:BIOSService"
     DEPLOYMENT_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_OSDeploymentService?SystemCreationClassName=DCIM_ComputerSystem,CreationClassName=DCIM_OSDeploymentService,SystemName=DCIM:ComputerSystem,Name=DCIM:OSDeploymentService"
     JOB_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_JobService?CreationClassName=DCIM_JobService,Name=JobService,SystemName=Idrac,SystemCreationClassName=DCIM_ComputerSystem"
     LC_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_LCService?SystemCreationClassName=DCIM_ComputerSystem,CreationClassName=DCIM_LCService,SystemName=DCIM:ComputerSystem,Name=DCIM:LCService"
@@ -180,10 +182,13 @@ module ASM
     # @api private
     # @param content [String] the response from calling {#invoke}
     # @return [Hash]
-    def self.parse(content)
+    def self.parse(content, require_body=true)
       doc = Nokogiri::XML.parse(content, &:noblanks)
       body = doc.search("//s:Body")
-      raise("Unexpected WS-Man Body: %s" % body.children) unless body.children.size == 1
+      unless body.children.size == 1
+        raise("Unexpected WS-Man Body: %s" % body.children) if require_body
+        return nil
+      end
       ret = {}
       response = body.children.first
       response.children.each do |e|
@@ -191,6 +196,30 @@ module ASM
         ret[key] = parse_element(e)
       end
       ret
+    end
+
+    def self.parse_enumeration(content)
+      responses = content.split("</s:Envelope>").map(&:strip).reject(&:empty?)
+
+      # Check and return fault if found
+      if responses.size == 1
+        ret = parse(responses.first, false)
+        return ret if ret
+      end
+
+      # Create an array of hashes containing each wsen:Item
+      responses.flat_map do |xml|
+        doc = Nokogiri::XML.parse(xml, &:noblanks)
+        body = doc.search("//wsen:Items")
+        next if body.children.empty?
+        body.children.map do |elem|
+          elem.children.inject({}) do |acc, e|
+            key = snake_case(e.name).to_sym
+            acc[key] = parse_element(e)
+            acc
+          end
+        end
+      end.compact
     end
 
     def self.reboot(endpoint, logger=nil)
@@ -559,8 +588,11 @@ module ASM
     # @param sym [Symbol]
     # @return [String]
     def self.param_key(sym)
-      if sym == :ip_address
+      case sym
+      when :ip_address
         "IPAddress"
+      when :source
+        "source"
       else
         camel_case(sym.to_s, :capitalize => true)
       end
@@ -625,11 +657,57 @@ module ASM
     # is called. The LC controller will be locked while the server is in this
     # state and no other LC jobs can be run.
     #
+    # @note {disconnect_network_iso_image} should be called as soon as the ISO is not needed.
     # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
     # @raise [ResponseError] if the command fails
     def self.connect_network_iso_image_command(endpoint, options={})
       osd_deployment_invoke_iso(endpoint, "ConnectNetworkISOImage", options)
+    end
+
+    # Connect a network ISO from a remote file system
+    #
+    # The ISO will become available as a virtual CD boot option. In order to
+    # boot off the ISO the normal server boot order must be separately configured.
+    # Unlike {connect_network_iso_image}, this method will not lock the LC controller
+    # and other LC jobs can be run as usual.
+    #
+    # @note {disconnect_rfs_iso_image} should be called as soon as the ISO is not needed.
+    # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
+    # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
+    # @raise [ResponseError] if the command fails
+    def self.connect_rfs_iso_image_command(endpoint, options={})
+      osd_deployment_invoke_iso(endpoint, "ConnectRFSISOImage", options)
+    end
+
+    # TODO: document and test
+    def self.invoke_service(endpoint, command, url, options={})
+      options = options.dup
+      url_params = Array(options.delete(:url_params))
+      required_params = Array(options.delete(:required_params))
+      optional_params = Array(options.delete(:optional_params))
+      all_required = url_params + required_params
+      missing_params = all_required.reject { |k| options.include?(k) }
+      raise("Missing required parameter(s) for %s: %s" % [command, missing_params.join(", ")]) unless missing_params.empty?
+
+      logger = options.delete(:logger) || Logger.new(nil)
+      return_value = options.delete(:return_value)
+
+      props = (required_params + optional_params).inject({}) do |acc, key|
+        acc[param_key(key)] = wsman_value(key, options[key])
+        acc
+      end
+
+      unless url_params.empty?
+        encoded_arguments = url_params.map { |k, v| "%s=%s" % [URI.escape(k), URI.escape(v)] }.join("&")
+        uri = URI(url)
+        url = "%s%s%s" % [url, uri.query ? "&" : "?", encoded_arguments]
+      end
+
+      resp = invoke(endpoint, command, url, :logger => logger, :props => props)
+      ret = parse(resp)
+      raise(ResponseError.new("%s failed" % command, ret)) if return_value && ret[:return_value] != return_value
+      ret
     end
 
     # Invoke a DCIM_DeploymentService command
@@ -641,12 +719,7 @@ module ASM
     # @option options [String] :return_value Expected ws-man return_value. An exception will be raised if this is not returned.
     # @return [Hash]
     def self.deployment_invoke(endpoint, command, options={})
-      resp = invoke(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, :logger => options[:logger])
-      ret = parse(resp)
-      if options[:return_value] && ret[:return_value] != options[:return_value]
-        raise(ResponseError.new("%s failed" % command, ret))
-      end
-      ret
+      invoke_service(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Detach an ISO that was mounted with {boot_to_network_iso_command}
@@ -674,6 +747,17 @@ module ASM
     def self.disconnect_network_iso_image(endpoint, options={})
       options = options.merge(:return_value => "0")
       deployment_invoke(endpoint, "DisconnectNetworkISOImage", options)
+    end
+
+    # Disconnect an ISO that was mounted with {connect_rfs_iso_image_command}
+    #
+    # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
+    # @param options [Hash]
+    # @option options [Logger] :logger
+    # @return [Hash]
+    def self.disconnect_rfs_iso_image(endpoint, options={})
+      options = options.merge(:return_value => "0")
+      deployment_invoke(endpoint, "DisconnectRFSISOImage", options)
     end
 
     # Get current drivers and ISO connection status
@@ -877,6 +961,33 @@ module ASM
 
     def self.sleep_time
       60
+    end
+
+    def self.enumerate(endpoint, url, options={})
+      content = invoke(endpoint, "enumerate", url, :logger => options[:logger])
+      resp = parse_enumeration(content)
+      if resp.is_a?(Hash)
+        klazz = URI.parse(url).split("/").last
+        raise(ResponseError.new("%s enumeration failed" % klazz, resp))
+      end
+      resp
+    end
+
+    def self.get_boot_config_settings(endpoint, options={})
+      enumerate(endpoint, "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting?__cimnamespace=root/dcim", options)
+    end
+
+    def self.get_boot_source_settings(endpoint, options={})
+      enumerate(endpoint, "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootSourceSetting?__cimnamespace=root/dcim", options)
+    end
+
+    def self.create_targeted_config_job(endpoint, options={})
+      invoke_service(endpoint, BIOS_SERVICE_SCHEMA, "CreateTargetedConfigJob", options)
+    end
+
+    def self.change_boot_source_state(endpoint, options={})
+      options = options.merge(:required_params => [:enabled_state, :source], :url_params => :instance_id, :return_value => "4096")
+      invoke_service(endpoint, "ChangeBootSourceState", "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting", options)
     end
   end
 end
