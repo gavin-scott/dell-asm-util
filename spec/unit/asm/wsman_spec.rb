@@ -135,17 +135,38 @@ describe ASM::WsMan do
     end
   end
 
+  describe "#parse_enumeration" do
+    it "should parse the enumeration content" do
+      content = SpecHelper.load_fixture("wsman/boot_config_setting.txt")
+      ret = ASM::WsMan.parse_enumeration(content)
+      expect(ret.size).to eq(5)
+      expect(ret[0]).to eq(:element_name => "BootSeq",
+                           :instance_id => "IPL",
+                           :is_current => "1",
+                           :is_default => "0",
+                           :is_next => "1")
+    end
+
+    it "should parse a fault response" do
+      content = SpecHelper.load_fixture("wsman/fault.xml")
+      expected = {:code => "wsman:InvalidParameter",
+                  :reason => "CMPI_RC_ERR_INVALID_PARAMETER",
+                  :detail => "http://schemas.dmtf.org/wbem/wsman/1/wsman/faultDetail/MissingValues"}
+      expect(ASM::WsMan.parse_enumeration(content)).to eq(expected)
+    end
+  end
+
   describe "#deployment_invoke" do
     it "should invoke invoke and parse the command" do
       expected = {:return_value => "0", :foo => "foo"}
-      ASM::WsMan.expects(:invoke).with(endpoint, "RspecCommand", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA, :logger => logger).returns("<rspec />")
+      ASM::WsMan.expects(:invoke).with(endpoint, "RspecCommand", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA, :logger => logger, :props => {}).returns("<rspec />")
       ASM::WsMan.expects(:parse).with("<rspec />").returns(expected)
       expect(ASM::WsMan.deployment_invoke(endpoint, "RspecCommand", :logger => logger)).to eq(expected)
     end
 
     it "should fail if the ReturnValue does not match" do
       expected = {:return_value => "2", :message => "Stuff broke"}
-      ASM::WsMan.expects(:invoke).with(endpoint, "RspecCommand", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA, :logger => logger).returns("<rspec />")
+      ASM::WsMan.expects(:invoke).with(endpoint, "RspecCommand", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA, :logger => logger, :props => {}).returns("<rspec />")
       ASM::WsMan.expects(:parse).with("<rspec />").returns(expected)
       expect do
         ASM::WsMan.deployment_invoke(endpoint, "RspecCommand", :return_value => "0", :logger => logger)
