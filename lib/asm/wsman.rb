@@ -295,13 +295,12 @@ module ASM
       powerstate
     end
 
+    def self.get_fc_views(endpoint, options={})
+      enumerate(endpoint, "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/DCIM/DCIM_FCView", options)
+    end
+
     def self.get_wwpns(endpoint, logger=nil)
-      response = invoke(endpoint, "enumerate",
-                        "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/DCIM/DCIM_FCView",
-                        :logger => logger)
-      response.split(/\n/).collect do |ele|
-        $1 if ele =~ %r{<n1:VirtualWWPN>(\S+)</n1:VirtualWWPN>}
-      end.compact
+      get_fc_views(endpoint, :logger => logger).map { |e| e[:virtual_wwpn] }.compact
     end
 
     # Returns true if the NIC can be used in an ASM deployment, false otherwise.
@@ -315,19 +314,19 @@ module ASM
     # 3. Product is Broadcom 57800. These are 2x10Gb, 2x1Gb NICs
     # 4. NIC is not disabled in the BIOS.
     def self.is_usable_nic?(nic_info, bios_info)
-      unsupported_embedded = nic_info["FQDD"].include?("Embedded") && !nic_info["ProductName"].include?("57810")
-      !nic_info["PermanentMACAddress"].nil? &&
+      unsupported_embedded = nic_info[:fqdd].include?("Embedded") && !nic_info[:product_name].include?("57810")
+      nic_info[:permanent_mac_address] && !nic_info[:permanent_mac_address].empty? &&
         !unsupported_embedded &&
-        !nic_info["ProductName"].match(/(Broadcom|QLogic).*5720/) &&
-        !nic_status(nic_info["FQDD"], bios_info).match(/disabled/i)
+        !nic_info[:product_name].match(/(Broadcom|QLogic).*5720/) &&
+        !nic_status(nic_info[:fqdd], bios_info).match(/disabled/i)
     end
 
     def self.nic_status(fqdd, bios_info)
       fqdd_display = bios_display_name(fqdd)
       nic_enabled = "Enabled"
       bios_info.each do |bios_ele|
-        if bios_ele["AttributeDisplayName"] == fqdd_display
-          nic_enabled = bios_ele["CurrentValue"]
+        if bios_ele[:attribute_display_name] == fqdd_display
+          nic_enabled = bios_ele[:current_value]
           break
         end
       end
@@ -351,140 +350,47 @@ module ASM
     # Return all the server MAC Address along with the interface location
     # in a hash format
     def self.get_mac_addresses(endpoint, logger=nil)
-      bios_info = get_bios_enumeration(endpoint, logger)
-      ret = get_nic_view(endpoint, logger).inject({}) do |result, element|
-        result[element["FQDD"]] = select_mac_address(element) if is_usable_nic?(element, bios_info)
+      bios_info = get_bios_enumeration(endpoint, :logger => logger)
+      ret = get_nic_view(endpoint, :logger => logger).inject({}) do |result, element|
+        result[element[:fqdd]] = select_mac_address(element) if is_usable_nic?(element, bios_info)
         result
       end
-      logger.debug("********* MAC Address List is #{ret.inspect} **************") if logger
       ret
     end
 
     def self.select_mac_address(element)
-      if element["CurrentMACAddress"] != "00:00:00:00:00:00"
-        element["CurrentMACAddress"]
-      elsif element["PermanentMACAddress"]
-        element["PermanentMACAddress"]
+      if element[:current_mac_address] != "00:00:00:00:00:00"
+        element[:current_mac_address]
+      elsif element[:permanent_mac_address]
+        element[:permanent_mac_address]
       end
     end
 
     def self.get_permanent_mac_addresses(endpoint, logger=nil)
-      bios_info = get_bios_enumeration(endpoint, logger)
-      ret = get_nic_view(endpoint, logger).inject({}) do |result, element|
-        unless element["FQDD"].include?("Embedded")
-          result[element["FQDD"]] = element["PermanentMACAddress"] if is_usable_nic?(element, bios_info)
+      bios_info = get_bios_enumeration(endpoint, :logger => logger)
+      ret = get_nic_view(endpoint, :logger => logger).inject({}) do |result, element|
+        unless element[:fqdd].include?("Embedded")
+          result[element[:fqdd]] = element[:permanent_mac_address] if is_usable_nic?(element, bios_info)
         end
         result
       end
-      logger.debug("********* MAC Address List is #{ret.inspect} **************") if logger
       ret
     end
 
     # Gets Nic View data
-    def self.get_nic_view(endpoint, logger=nil, tries=0)
-      resp = invoke(endpoint, "enumerate",
-                    "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_NICView",
-                    :logger => logger)
-      nic_views = resp.split("<n1:DCIM_NICView>")
-      nic_views.shift
-      ret = nic_views.collect do |nic_view|
-        nic_view.split("\n").inject({}) do |acc, line|
-          if line =~ %r{<n1:(\S+).*>(.*)</n1:\S+>}
-            acc[$1] = $2
-          elsif line =~ %r{<n1:(\S+).*/>}
-            acc[$1] = nil
-          end
-          acc
-        end
-      end
+    def self.get_nic_view(endpoint, options={})
+      schema = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_NICView"
+      ret = enumerate(endpoint, schema, options)
 
       # Apparently we sometimes see a spurious empty return value...
-      if ret.empty? && tries == 0
-        ret = get_nic_view(endpoint, logger, tries + 1)
-      end
+      ret = enumerate(endpoint, schema, options) if ret.empty?
+
       ret
     end
 
     # Gets Nic View data
-    def self.get_bios_enumeration(endpoint, logger=nil)
-      resp = invoke(endpoint, "enumerate",
-                    "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_BIOSEnumeration",
-                    :logger => logger)
-      bios_enumeration = resp.split("<n1:DCIM_BIOSEnumeration>")
-      bios_enumeration.shift
-      bios_enumeration.collect do |bios_view|
-        bios_view.split("\n").inject({}) do |ret, line|
-          if line =~ %r{<n1:(\S+).*>(.*)</n1:\S+>}
-            ret[$1] = $2
-          elsif line =~ %r{<n1:(\S+).*/>}
-            ret[$1] = nil
-          end
-          ret
-        end
-      end
-    end
-
-    # Gets Nic View data for a specified fqdd
-    def self.get_fcoe_wwpn(endpoint, logger=nil)
-      fcoe_info = {}
-      resp = invoke(endpoint, "enumerate",
-                    "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_NICView",
-                    :logger => logger)
-      nic_views = resp.split("<n1:DCIM_NICView>")
-      nic_views.shift
-      nic_views.each do |nic_view|
-        nic_name = nil
-        nic_view.split("\n").each do |line|
-          if line =~ %r{<n1:FQDD>(\S+)</n1:FQDD>}
-            nic_name = $1
-            fcoe_info[nic_name] = {}
-          end
-        end
-        nic_view.split("\n").each do |line|
-          if line =~ %r{<n1:FCoEWWNN>(\S+)</n1:FCoEWWNN>}
-            fcoe_wwnn = $1
-            fcoe_info[nic_name]["fcoe_wwnn"] = fcoe_wwnn
-          end
-
-          if line =~ %r{<n1:PermanentFCOEMACAddress>(\S+)</n1:PermanentFCOEMACAddress>}
-            fcoe_permanent_fcoe_macaddress = $1
-            fcoe_info[nic_name]["fcoe_permanent_fcoe_macaddress"] = fcoe_permanent_fcoe_macaddress
-          end
-
-          if line =~ %r{<n1:FCoEOffloadMode>(\S+)</n1:FCoEOffloadMode>}
-            fcoe_offload_mode = $1
-            fcoe_info[nic_name]["fcoe_offload_mode"] = fcoe_offload_mode
-          end
-
-          if line =~ %r{<n1:VirtWWN>(\S+)</n1:VirtWWN>}
-            virt_wwn = $1
-            fcoe_info[nic_name]["virt_wwn"] = virt_wwn
-          end
-
-          if line =~ %r{<n1:VirtWWPN>(\S+)</n1:VirtWWPN>}
-            virt_wwpn = $1
-            fcoe_info[nic_name]["virt_wwpn"] = virt_wwpn
-          end
-
-          if line =~ %r{<n1:WWN>(\S+)</n1:WWN>}
-            wwn = $1
-            fcoe_info[nic_name]["wwn"] = wwn
-          end
-
-          if line =~ %r{<n1:WWPN>(\S+)</n1:WWPN>}
-            wwpn = $1
-            fcoe_info[nic_name]["wwpn"] = wwpn
-          end
-        end
-      end
-
-      # Remove the Embedded NICs from the list
-      fcoe_info.keys.each do |nic_name|
-        fcoe_info.delete(nic_name) if nic_name.include?("Embedded")
-      end
-
-      logger.debug("FCoE info: #{fcoe_info.inspect} **************") if logger
-      fcoe_info
+    def self.get_bios_enumeration(endpoint, options={})
+      enumerate(endpoint, "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_BIOSEnumeration", options)
     end
 
     # Gets LC status
@@ -593,9 +499,43 @@ module ASM
         "IPAddress"
       when :source
         "source"
+      when :instance_id
+        "InstanceID"
       else
         camel_case(sym.to_s, :capitalize => true)
       end
+    end
+
+    # TODO: document and test
+    def self.invoke_service(endpoint, command, url, options={})
+      options = options.dup
+      url_params = Array(options.delete(:url_params))
+      required_params = Array(options.delete(:required_params))
+      optional_params = Array(options.delete(:optional_params))
+      all_required = url_params + required_params
+      missing_params = all_required.reject { |k| options.include?(k) }
+      raise("Missing required parameter(s) for %s: %s" % [command, missing_params.join(", ")]) unless missing_params.empty?
+
+      logger = options.delete(:logger) || Logger.new(nil)
+      return_value = options.delete(:return_value)
+
+      props = (required_params + optional_params).inject({}) do |acc, key|
+        acc[param_key(key)] = wsman_value(key, options[key])
+        acc
+      end
+
+      unless url_params.empty?
+        encoded_arguments = url_params.map do |key|
+          "%s=%s" % [URI.escape(param_key(key)), URI.escape(wsman_value(key, options[key]))]
+        end.join("&")
+        uri = URI(url)
+        url = "%s%s%s" % [url, uri.query ? "&" : "?", encoded_arguments]
+      end
+
+      resp = invoke(endpoint, command, url, :logger => logger, :props => props)
+      ret = parse(resp)
+      raise(ResponseError.new("%s failed" % command, ret)) if return_value && ret[:return_value] != return_value
+      ret
     end
 
     # Invoke a deployment ISO command
@@ -621,23 +561,10 @@ module ASM
     # @return [Hash]
     # @raise [ResponseError] if the command fails
     def self.osd_deployment_invoke_iso(endpoint, command, options={})
-      options = options.dup
-      required_api_params = [:ip_address, :share_name, :share_type, :image_name]
-      optional_api_params = [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect]
-      missing_params = required_api_params.reject { |k| options.include?(k) }
-      raise("Missing required parameter(s): %s" % missing_params.join(", ")) unless missing_params.empty?
-
-      logger = options.delete(:logger)
-      options.reject! { |k| !(required_api_params + optional_api_params).include?(k) }
-
-      props = options.keys.inject({}) do |acc, key|
-        acc[param_key(key)] = wsman_value(key, options[key])
-        acc
-      end
-      resp = invoke(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, :logger => logger, :props => props)
-      ret = parse(resp)
-      raise(ResponseError.new("%s failed" % command, ret)) unless ret[:return_value] == "4096"
-      ret
+      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
+                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                              :return_value => "4096")
+      invoke_service(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Reboot server to a network ISO
@@ -647,7 +574,10 @@ module ASM
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
     # @raise [ResponseError] if the command fails
     def self.boot_to_network_iso_command(endpoint, options={})
-      osd_deployment_invoke_iso(endpoint, "BootToNetworkISO", options)
+      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
+                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                              :return_value => "4096")
+      invoke_service(endpoint, "BootToNetworkISO", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Connect a network ISO as a virtual CD-ROM
@@ -662,7 +592,10 @@ module ASM
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
     # @raise [ResponseError] if the command fails
     def self.connect_network_iso_image_command(endpoint, options={})
-      osd_deployment_invoke_iso(endpoint, "ConnectNetworkISOImage", options)
+      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
+                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                              :return_value => "4096")
+      invoke_service(endpoint, "ConnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Connect a network ISO from a remote file system
@@ -677,37 +610,10 @@ module ASM
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
     # @raise [ResponseError] if the command fails
     def self.connect_rfs_iso_image_command(endpoint, options={})
-      osd_deployment_invoke_iso(endpoint, "ConnectRFSISOImage", options)
-    end
-
-    # TODO: document and test
-    def self.invoke_service(endpoint, command, url, options={})
-      options = options.dup
-      url_params = Array(options.delete(:url_params))
-      required_params = Array(options.delete(:required_params))
-      optional_params = Array(options.delete(:optional_params))
-      all_required = url_params + required_params
-      missing_params = all_required.reject { |k| options.include?(k) }
-      raise("Missing required parameter(s) for %s: %s" % [command, missing_params.join(", ")]) unless missing_params.empty?
-
-      logger = options.delete(:logger) || Logger.new(nil)
-      return_value = options.delete(:return_value)
-
-      props = (required_params + optional_params).inject({}) do |acc, key|
-        acc[param_key(key)] = wsman_value(key, options[key])
-        acc
-      end
-
-      unless url_params.empty?
-        encoded_arguments = url_params.map { |k, v| "%s=%s" % [URI.escape(k), URI.escape(v)] }.join("&")
-        uri = URI(url)
-        url = "%s%s%s" % [url, uri.query ? "&" : "?", encoded_arguments]
-      end
-
-      resp = invoke(endpoint, command, url, :logger => logger, :props => props)
-      ret = parse(resp)
-      raise(ResponseError.new("%s failed" % command, ret)) if return_value && ret[:return_value] != return_value
-      ret
+      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
+                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                              :return_value => "4096")
+      invoke_service(endpoint, "ConnectRFSISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Invoke a DCIM_DeploymentService command
@@ -730,7 +636,7 @@ module ASM
     # @return [Hash]
     def self.detach_iso_image(endpoint, options={})
       options = options.merge(:return_value => "0")
-      deployment_invoke(endpoint, "DetachISOImage", options)
+      invoke_service(endpoint, "DetachISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # @deprecated Use {detach_iso_image} instead.
@@ -746,7 +652,7 @@ module ASM
     # @return [Hash]
     def self.disconnect_network_iso_image(endpoint, options={})
       options = options.merge(:return_value => "0")
-      deployment_invoke(endpoint, "DisconnectNetworkISOImage", options)
+      invoke_service(endpoint, "DisconnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Disconnect an ISO that was mounted with {connect_rfs_iso_image_command}
@@ -757,7 +663,7 @@ module ASM
     # @return [Hash]
     def self.disconnect_rfs_iso_image(endpoint, options={})
       options = options.merge(:return_value => "0")
-      deployment_invoke(endpoint, "DisconnectRFSISOImage", options)
+      invoke_service(endpoint, "DisconnectRFSISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Get current drivers and ISO connection status
@@ -777,7 +683,7 @@ module ASM
     # @option options [Logger] :logger
     # @return [Hash]
     def self.get_attach_status(endpoint, options={})
-      deployment_invoke(endpoint, "GetAttachStatus", options)
+      invoke_service(endpoint, "GetAttachStatus", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Get ISO image connection info
@@ -796,7 +702,7 @@ module ASM
     # @option options [Logger] :logger
     # @return [Hash]
     def self.get_network_iso_image_connection_info(endpoint, options={})
-      deployment_invoke(endpoint, "GetNetworkISOConnectionInfo", options)
+      invoke_service(endpoint, "GetNetworkISOConnectionInfo", DEPLOYMENT_SERVICE_SCHEMA, options)
     end
 
     # Get deployment job status
@@ -859,7 +765,11 @@ module ASM
       poll_for_lc_ready(endpoint, :logger => logger)
 
       logger.info("Invoking %s with ISO %s on %s" % [command, options[:image_name], endpoint[:host]])
-      resp = osd_deployment_invoke_iso(endpoint, command, options)
+      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
+                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                              :return_value => "4096")
+      resp = invoke_service(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, options)
+
       logger.info("Initiated %s job %s on %s" % [command, resp[:job], endpoint[:host]])
       resp = poll_deployment_job(endpoint, resp[:job], options)
       raise(ResponseError.new("%s job %s failed" % [command, resp[:job]], resp)) unless resp[:job_status] == "Success"

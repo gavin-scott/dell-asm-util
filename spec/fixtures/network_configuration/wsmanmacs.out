@@ -1,5 +1,5 @@
-<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:wsen=\"http://schemas.xmlsoap.org/ws/2004/09/enumeration\">
+<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
   <s:Header>
     <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
     <wsa:Action>http://schemas.xmlsoap.org/ws/2004/09/enumeration/EnumerateResponse</wsa:Action>
@@ -12,8 +12,8 @@
     </wsen:EnumerateResponse>
   </s:Body>
 </s:Envelope>
-<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:wsen=\"http://schemas.xmlsoap.org/ws/2004/09/enumeration\" xmlns:n1=\"http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_NICView\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">
+<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration" xmlns:n1="http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_NICView" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <s:Header>
     <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
     <wsa:Action>http://schemas.xmlsoap.org/ws/2004/09/enumeration/PullResponse</wsa:Action>
@@ -27,7 +27,7 @@
         <n1:DCIM_NICView>
           <n1:AutoNegotiation>3</n1:AutoNegotiation>
           <n1:BusNumber>1</n1:BusNumber>
-          <n1:ControllerBIOSVersion xsi:nil=\"true\"/>
+          <n1:ControllerBIOSVersion xsi:nil="true"/>
           <n1:CurrentMACAddress>00:0E:AA:6B:00:19</n1:CurrentMACAddress>
           <n1:DataBusWidth>0002</n1:DataBusWidth>
           <n1:DeviceDescription>Integrated NIC 1 Port 1 Partition 1</n1:DeviceDescription>
@@ -70,8 +70,8 @@
     </wsen:PullResponse>
   </s:Body>
 </s:Envelope>
-<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:wsen=\"http://schemas.xmlsoap.org/ws/2004/09/enumeration\" xmlns:n1=\"http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_NICView\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">
+<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsen="http://schemas.xmlsoap.org/ws/2004/09/enumeration" xmlns:n1="http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_NICView" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <s:Header>
     <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
     <wsa:Action>http://schemas.xmlsoap.org/ws/2004/09/enumeration/PullResponse</wsa:Action>
@@ -84,7 +84,7 @@
         <n1:DCIM_NICView>
           <n1:AutoNegotiation>2</n1:AutoNegotiation>
           <n1:BusNumber>1</n1:BusNumber>
-          <n1:ControllerBIOSVersion xsi:nil=\"true\"/>
+          <n1:ControllerBIOSVersion xsi:nil="true"/>
           <n1:CurrentMACAddress>00:0E:AA:6B:00:1E</n1:CurrentMACAddress>
           <n1:DataBusWidth>0002</n1:DataBusWidth>
           <n1:DeviceDescription>Integrated NIC 1 Port 2 Partition 1</n1:DeviceDescription>
