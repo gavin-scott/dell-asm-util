@@ -6,44 +6,10 @@ require "hashie"
 require "nokogiri"
 require "logger"
 require "uri"
+require "asm/wsman/parser"
 
 module ASM
-  module WsMan
-    class Error < StandardError; end
-
-    # Convert a wsman response hash into a human-readable string.
-    #
-    # @example
-    #     response = {:message => "Could not connect to share", :code => "XXX", :return_value => "2"}
-    #     ASM::WsMan.response_string(response) #=> "Could not connect to share [code: XXX, return_value: 2]"
-    #
-    # @api private
-    # @param response [Hash] ws-man response as a Hash, i.e. after calling {#parse} on the response.
-    # @return [String]
-    def self.response_string(response)
-      copy = response.dup
-      message = copy.delete(:message)
-      message = copy.delete(:reason) unless message
-      message = copy.delete(:job_status) unless message
-      ret = copy.keys.map { |k| "%s: %s" % [k, copy[k]]}.join(", ")
-      ret = "%s [%s]" % [message, ret] if message
-      ret
-    end
-
-    # An exception that encapsulates a ws-man response.
-    class ResponseError < StandardError
-      attr_reader :response
-
-      def initialize(msg, response)
-        super(msg)
-        @response = response
-      end
-
-      def to_s
-        "%s: %s" % [super.to_s, ASM::WsMan.response_string(response)]
-      end
-    end
-
+  class WsMan
     # rubocop:disable Metrics/LineLength
     BIOS_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_BIOSService?SystemCreationClassName=DCIM_ComputerSystem,CreationClassName=DCIM_BIOSService,SystemName=DCIM:ComputerSystem,Name=DCIM:BIOSService"
     DEPLOYMENT_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_OSDeploymentService?SystemCreationClassName=DCIM_ComputerSystem,CreationClassName=DCIM_OSDeploymentService,SystemName=DCIM:ComputerSystem,Name=DCIM:OSDeploymentService"
@@ -51,6 +17,25 @@ module ASM
     LC_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_LCService?SystemCreationClassName=DCIM_ComputerSystem,CreationClassName=DCIM_LCService,SystemName=DCIM:ComputerSystem,Name=DCIM:LCService"
     SOFTWARE_INSTALLATION_SERVICE_SCHEMA = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_SoftwareInstallationService?CreationClassName=DCIM_SoftwareInstallationService,SystemCreationClassName=DCIM_ComputerSystem,SystemName=IDRAC:ID,Name=SoftwareUpdate"
     # rubocop:enable Metrics/LineLength
+
+    attr_reader :endpoint, :logger
+
+    def initialize(endpoint, options={})
+      missing_params = [:host, :user, :password].reject { |k| endpoint.include?(k) }
+      raise("Missing required endpoint parameter(s): %s" % [missing_params.join(", ")]) unless missing_params.empty?
+      @endpoint = endpoint
+      @logger = options.delete(:logger) || Logger.new(nil)
+      if !options[:logger].respond_to?(:error) && options[:logger].respond_to?(:err)
+        # Puppet logger has most Logger methods, but uses err instead of error
+        def @logger.error(msg)
+          err(msg)
+        end
+      end
+    end
+
+    def host
+      endpoint[:host]
+    end
 
     # Invoke the wsman CLI cient
     #
@@ -69,22 +54,13 @@ module ASM
     # @option options Logger] :logger logger for debug messages
     # @option options [FixNum] :nth_attempt used internally to allow recursive retry
     # rubocop:disable Metrics/MethodLength, Metrics/BlockNesting
-    def self.invoke(endpoint, method, schema, options={})
+    def invoke(method, schema, options={})
       options = {
-        :selector => nil,
-        :props => {},
-        :input_file => nil,
-        :logger => nil,
-        :nth_attempt => 0
+          :selector => nil,
+          :props => {},
+          :input_file => nil,
+          :nth_attempt => 0
       }.merge(options)
-
-      unless options[:logger].nil? || options[:logger].respond_to?(:error)
-        # The Puppet class has most of the methods loggers respond to except for error
-        logger = options[:logger]
-        def logger.error(msg)
-          err(msg)
-        end
-      end
 
       if %w(enumerate get).include?(method)
         args = [method, schema]
@@ -92,7 +68,7 @@ module ASM
         args = ["invoke", "-a", method, schema]
       end
 
-      args += ["-h", endpoint[:host],
+      args += ["-h", host,
                "-V", "-v", "-c", "dummy.cert", "-P", "443",
                "-u", endpoint[:user],
                "-j", "utf-8", "-m", "256", "-y", "basic", "--transport-timeout=300"]
@@ -101,12 +77,10 @@ module ASM
         args += ["-k", "#{key}=#{val}"]
       end
 
-      if options[:logger]
-        options[:logger].debug("Executing wsman #{args.join(' ')}")
-      end
+        logger.debug("Executing wsman #{args.join(' ')}")
       result = ASM::Util.run_command_with_args("env", "WSMAN_PASS=#{endpoint[:password]}",
                                                "wsman", "--non-interactive", *args)
-      options[:logger].debug("Result = #{result}") if options[:logger]
+      logger.debug("Result = #{result}")
 
       # The wsman cli does not set exit_status properly on failure, so we
       # have to check stderr as well...
@@ -115,24 +89,24 @@ module ASM
           if options[:nth_attempt] < 2
             # We have seen sporadic authentication failed errors from idrac. Retry a couple times
             options[:nth_attempt] += 1
-            options[:logger].info("Authentication failed, retrying #{endpoint[:host]}...") if options[:logger]
+            logger.info("Authentication failed, retrying #{host}...")
             sleep 10
-            return invoke(endpoint, method, schema, options)
+            return invoke(method, schema, options)
           end
-          msg = "Authentication failed, please retry with correct credentials after resetting the iDrac at #{endpoint[:host]}."
+          msg = "Authentication failed, please retry with correct credentials after resetting the iDrac at #{host}."
         elsif result["stdout"] =~ /Connection failed./ || result["stderr"] =~ /Connection failed./
           if options[:nth_attempt] < 2
             # We have seen sporadic connection failed errors from idrac. Retry a couple times
             options[:nth_attempt] += 1
-            options[:logger].info("Connection failed, retrying #{endpoint[:host]}...") if options[:logger]
+            logger.info("Connection failed, retrying #{host}...")
             sleep 10
-            return invoke(endpoint, method, schema, options)
+            return invoke(method, schema, options)
           end
-          msg = "Connection failed, Couldn't connect to server. Please check IP address credentials for iDrac at #{endpoint[:host]}."
+          msg = "Connection failed, Couldn't connect to server. Please check IP address credentials for iDrac at #{host}."
         else
-          msg = "Failed to execute wsman command against server #{endpoint[:host]}"
+          msg = "Failed to execute wsman command against server #{host}"
         end
-        options[:logger].error(msg) if options[:logger]
+        logger.error(msg)
         raise(Error, "#{msg}: #{result}")
       end
 
@@ -144,8 +118,8 @@ module ASM
           if node
             node.text
           else
-            msg = "Invalid WS-MAN response from server #{endpoint[:host]}"
-            options[:logger].error(msg) if options[:logger]
+            msg = "Invalid WS-MAN response from server #{host}"
+            logger.error(msg)
             raise(Error, msg)
           end
         end
@@ -154,101 +128,89 @@ module ASM
         result["stdout"]
       end
     end
+
+    def self.invoke(endpoint, method, schema, options={})
+      WsMan.new(endpoint, options).invoke(method, schema, options)
+    end
     # rubocop:enable Metrics/MethodLength, Metrics/BlockNesting
-
-    # Parse a ws-man response element into a value
-    #
-    # Special-case handling exists for wsman:Selector responses which are used to
-    # indicate job responses and for s:Subcode responses which are used in wsman faults.
-    #
-    # @api private
-    # @param elem [Nokogiri::XML::Element]
-    # @return [String]
-    def self.parse_element(elem)
-      if elem.namespaces.keys.include?("xmlns:wsman") && !(params = elem.xpath(".//wsman:Selector[@Name='InstanceID']")).empty?
-        params.first.text
-      elsif !(params = elem.xpath(".//s:Subcode")).empty? && params.children.size > 0
-        params.children.map(&:text).join(", ")
-      elsif elem.attributes["nil"] && elem.attributes["nil"].value == "true"
-        nil
-      else
-        elem.text
-      end
-    end
-
-    # Parse wsman response into a Hash
-    #
-    # @note currently does not work with enumerate responses
-    # @api private
-    # @param content [String] the response from calling {#invoke}
-    # @return [Hash]
-    def self.parse(content, require_body=true)
-      doc = Nokogiri::XML.parse(content, &:noblanks)
-      body = doc.search("//s:Body")
-      unless body.children.size == 1
-        raise("Unexpected WS-Man Body: %s" % body.children) if require_body
-        return nil
-      end
-      ret = {}
-      response = body.children.first
-      response.children.each do |e|
-        key = snake_case(e.name).to_sym
-        ret[key] = parse_element(e)
-      end
-      ret
-    end
-
-    def self.parse_enumeration(content)
-      responses = content.split("</s:Envelope>").map(&:strip).reject(&:empty?)
-
-      # Check and return fault if found
-      if responses.size == 1
-        ret = parse(responses.first, false)
-        return ret if ret
-      end
-
-      # Create an array of hashes containing each wsen:Item
-      responses.flat_map do |xml|
-        doc = Nokogiri::XML.parse(xml, &:noblanks)
-        body = doc.search("//wsen:Items")
-        next if body.children.empty?
-        body.children.map do |elem|
-          elem.children.inject({}) do |acc, e|
-            key = snake_case(e.name).to_sym
-            acc[key] = parse_element(e)
-            acc
-          end
-        end
-      end.compact
-    end
 
     def self.reboot(endpoint, logger=nil)
       # Create the reboot job
-      logger.debug("Rebooting server #{endpoint[:host]}") if logger
-      instanceid = invoke(endpoint,
-                          "CreateRebootJob",
-                          SOFTWARE_INSTALLATION_SERVICE_SCHEMA,
-                          :selector => '//wsman:Selector Name="InstanceID"',
-                          :props => {"RebootJobType" => "1"},
-                          :logger => logger)
+      logger.debug("Rebooting server #{host}") if logger
+      wsman = ASM::WsMan.new(endpoint, :logger => logger)
+      instanceid = wsman.invoke("CreateRebootJob",
+                                SOFTWARE_INSTALLATION_SERVICE_SCHEMA,
+                                :selector => '//wsman:Selector Name="InstanceID"',
+                                :props => {"RebootJobType" => "1"},
+                                :logger => logger)
 
       # Execute job
-      jobmessage = invoke(endpoint,
-                          "SetupJobQueue",
-                          JOB_SERVICE_SCHEMA,
-                          :selector => "//n1:Message",
-                          :props => {
-                            "JobArray" => instanceid,
-                            "StartTimeInterval" => "TIME_NOW"
-                          },
-                          :logger => logger)
+      jobmessage = wsman.invoke("SetupJobQueue",
+                                JOB_SERVICE_SCHEMA,
+                                :selector => "//n1:Message",
+                                :props => {
+                                    "JobArray" => instanceid,
+                                    "StartTimeInterval" => "TIME_NOW"
+                                },
+                                :logger => logger)
       logger.debug "Job Message #{jobmessage}" if logger
       true
     end
 
+    def create_reboot_job(params={})
+      invoke_service("CreateRebootJob", SOFTWARE_INSTALLATION_SERVICE_SCHEMA, :params => params,
+                            :optional_params => [:reboot_start_time, :reboot_job_type],
+                            :return_value => "4096")
+    end
+
+    def setup_job_queue(params={})
+      invoke_service("SetupJobQueue", JOB_SERVICE_SCHEMA, :params => params,
+                     :optional_params => [:job_array, :start_time_interval, :until_time],
+                     :return_value => "0")
+    end
+
+    # Special value of JID_CLEARALL deletes all jobs
+    def delete_job_queue(params={})
+      invoke_service("DeleteJobQueue", JOB_SERVICE_SCHEMA, :params => params,
+                     :optional_params => [:job_id],
+                     :return_value => "0")
+    end
+
+    def get_jobs
+      enumerate("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_JobService")
+    end
+
+    def get_controller_views
+      enumerate("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_ControllerView")
+    end
+
+    def get_virtual_disk_views
+      enumerate("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_VirtualDiskView")
+    end
+
+    def get_physical_disk_views
+      enumerate("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_PhysicalDiskView")
+    end
+
+    def reboot(options={})
+      options = {:reboot_job_type => :graceful_with_forced_shutdown,
+                 :reboot_start_time => "TIME_NOW",
+                 :timeout => 5 * 60}.merge(options)
+      logger.info("Rebooting server %s" % host)
+      resp = create_reboot_job(options)
+      logger.info("Created reboot job %s on %s" % [resp[:reboot_job_id], host])
+      setup_job_queue(:job_array => resp[:reboot_job_id],
+                      :start_time_interval => "TIME_NOW", :logger => logger)
+      logger.info("Waiting for reboot job %s to complete on %s" % [resp[:reboot_job_id], host])
+      poll_lc_job(resp[:reboot_job_id], :timeout => 15 * 60, :logger => logger)
+      logger.info("Successfully rebooted %s" % host)
+      poll_for_lc_ready(options)
+    end
+
+    # @deprecated
     def self.poweroff(endpoint, logger=nil)
       # Create the reboot job
-      logger.debug("Power off server #{endpoint[:host]}") if logger
+      logger.debug("Power off server #{host}") if logger
 
       power_state = get_power_state(endpoint, logger)
       if power_state.to_i != 13
@@ -263,9 +225,10 @@ module ASM
       true
     end
 
+    # @deprecated
     def self.poweron(endpoint, logger=nil)
       # Create the reboot job
-      logger.debug("Power on server #{endpoint[:host]}") if logger
+      logger.debug("Power on server #{host}") if logger
 
       power_state = get_power_state(endpoint, logger)
       if power_state.to_i != 2
@@ -280,9 +243,10 @@ module ASM
       true
     end
 
+    # @deprecated
     def self.get_power_state(endpoint, logger=nil)
       # Create the reboot job
-      logger.debug("Getting the power state of the server with iDRAC IP: #{endpoint[:host]}") if logger
+      logger.debug("Getting the power state of the server with iDRAC IP: #{host}") if logger
       response = invoke(endpoint,
                         "enumerate",
                         "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/DCIM_CSAssociatedPowerManagementService",
@@ -295,12 +259,13 @@ module ASM
       powerstate
     end
 
-    def self.get_fc_views(endpoint, options={})
-      enumerate(endpoint, "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/DCIM/DCIM_FCView", options)
+    def get_fc_views
+      enumerate("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/DCIM/DCIM_FCView")
     end
 
+    # @deprecated
     def self.get_wwpns(endpoint, logger=nil)
-      get_fc_views(endpoint, :logger => logger).map { |e| e[:virtual_wwpn] }.compact
+      ASM::WsMan.new(endpoint, :logger => logger).get_fc_views.map { |e| e[:virtual_wwpn] }.compact
     end
 
     # Returns true if the NIC can be used in an ASM deployment, false otherwise.
@@ -349,9 +314,11 @@ module ASM
 
     # Return all the server MAC Address along with the interface location
     # in a hash format
+    # @deprecated
     def self.get_mac_addresses(endpoint, logger=nil)
-      bios_info = get_bios_enumeration(endpoint, :logger => logger)
-      ret = get_nic_view(endpoint, :logger => logger).inject({}) do |result, element|
+      wsman = ASM::WsMan.new(endpoint, :logger => logger)
+      bios_info = wsman.get_bios_enumeration
+      ret = wsman.get_nic_view.inject({}) do |result, element|
         result[element[:fqdd]] = select_mac_address(element) if is_usable_nic?(element, bios_info)
         result
       end
@@ -367,8 +334,9 @@ module ASM
     end
 
     def self.get_permanent_mac_addresses(endpoint, logger=nil)
-      bios_info = get_bios_enumeration(endpoint, :logger => logger)
-      ret = get_nic_view(endpoint, :logger => logger).inject({}) do |result, element|
+      wsman = ASM::WsMan.new(endpoint, :logger => logger)
+      bios_info = wsman.get_bios_enumeration
+      ret = wsman.get_nic_view.inject({}) do |result, element|
         unless element[:fqdd].include?("Embedded")
           result[element[:fqdd]] = element[:permanent_mac_address] if is_usable_nic?(element, bios_info)
         end
@@ -378,24 +346,25 @@ module ASM
     end
 
     # Gets Nic View data
-    def self.get_nic_view(endpoint, options={})
+    def get_nic_view
       schema = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_NICView"
-      ret = enumerate(endpoint, schema, options)
+      ret = enumerate(schema)
 
       # Apparently we sometimes see a spurious empty return value...
-      ret = enumerate(endpoint, schema, options) if ret.empty?
+      ret = enumerate(schema) if ret.empty?
 
       ret
     end
 
     # Gets Nic View data
-    def self.get_bios_enumeration(endpoint, options={})
-      enumerate(endpoint, "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_BIOSEnumeration", options)
+    def get_bios_enumeration
+      enumerate("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_BIOSEnumeration")
     end
 
     # Gets LC status
+    # @deprecated
     def self.lcstatus(endpoint, logger=nil)
-      invoke(endpoint, "GetRemoteServicesAPIStatus", LC_SERVICE_SCHEMA, :selector => "//n1:LCStatus", :logger => logger)
+      ASM::WsMan.new(endpoint, :logger => logger).get_lc_status.fetch(:lcstatus, nil)
     end
 
     # Get the lifecycle controller (LC) status
@@ -413,128 +382,40 @@ module ASM
     # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
     # @option options [Hash] :logger
     # @return [Hash]
-    def self.get_lc_status(endpoint, options={})
-      logger = options[:logger] || Logger.new(nil)
-      resp = invoke(endpoint, "GetRemoteServicesAPIStatus", LC_SERVICE_SCHEMA, :logger => logger)
-      parse(resp)
-    end
-
-    # Converts a ws-man parameter key into snake case
-    #
-    # Special case handling is included for various nouns that are usually (but
-    # not always) capitalized such as ISO, MAC, FCOE, and WWNN>
-    #
-    # @param str [String] the wsman parameter key
-    # @return [String]
-    def self.snake_case(str)
-      ret = str
-      ret = ret.gsub(/ISO([A-Z]?)/) {|_e| "Iso%s" % $1}
-      ret = ret.gsub(/MAC([A-Z]?)/) {|_e| "Mac%s" % $1}
-      ret = ret.gsub(/FC[oO]E([A-Z]?)/) {|_e| "Fcoe%s" % $1}
-      ret = ret.gsub(/WWNN([A-Z]?)/) {|_e| "Wwnn%s" % $1}
-      ret = ret.gsub(/([A-Z]+)/) {|_e| "_%s" % $1.downcase}
-      if ret =~ /^[_]+(.*)$/
-        ret = $1
-        ret = "%s%s" % [$1, ret] if str =~ /^([_]+)/
-      end
-      ret
-    end
-
-    # Search for the value in both the enum keys and values
-    #
-    # @param key [String] the enum name, used for error messaging only
-    # @param enum [Hash] a hash of key/values. The values should be strings.
-    # @param value [Object]
-    # @return [String]
-    # @raise [StandardError] if the value cannot be found in the enum
-    def self.enum_value(key, enum, value)
-      return enum[value] if enum[value]
-      return value.to_s if enum.values.include?(value.to_s)
-      allowed = enum.keys.map { |k| "%s (%s)" % [k.inspect, enum[k]]}.join(", ")
-      raise("Invalid %s value: %s; allowed values are: %s" % [key.to_s, value, allowed])
-    end
-
-    # Convert known wsman properties to their expected format
-    #
-    # Converts known enum keys such as :share_type and :hash_type to their value.
-    # Value is returned unmodified for other keys.
-    #
-    # @api private
-    # @param key [Symbol] the property key, such as :share_type or :hash_type
-    # @return [String]
-    # @raise [StandardError] if an enum key has an unknown value
-    def self.wsman_value(key, value)
-      case key
-      when :share_type
-        enum_value(:share_type, {:nfs => "0", :cifs => "2"}, value)
-      when :hash_type
-        enum_value(:hash_type, {:md5 => "1", :sha1 => "2"}, value)
-      else
-        value
-      end
-    end
-
-    # Convert string to camel case
-    #
-    # @api private
-    # @param str [String]
-    # @param options [Hash]
-    # @option options [Boolean] :capitalize whether to capitalize the final result
-    # @return [String]
-    def self.camel_case(str, options={})
-      options = {:capitalize => false}.merge(options)
-      ret = str.gsub(/_(.)/) {|_e| $1.upcase}
-      ret[0] = ret[0].upcase if options[:capitalize]
-      ret
-    end
-
-    # Convert a symbol to a ws-man parameter key
-    #
-    # @api private
-    # @param sym [Symbol]
-    # @return [String]
-    def self.param_key(sym)
-      case sym
-      when :ip_address
-        "IPAddress"
-      when :source
-        "source"
-      when :instance_id
-        "InstanceID"
-      else
-        camel_case(sym.to_s, :capitalize => true)
-      end
+    def get_lc_status
+      invoke_service("GetRemoteServicesAPIStatus", LC_SERVICE_SCHEMA)
     end
 
     # TODO: document and test
-    def self.invoke_service(endpoint, command, url, options={})
-      options = options.dup
+    def invoke_service(command, url, options={})
+      params = options.delete(:params) || {}
       url_params = Array(options.delete(:url_params))
       required_params = Array(options.delete(:required_params))
       optional_params = Array(options.delete(:optional_params))
       all_required = url_params + required_params
-      missing_params = all_required.reject { |k| options.include?(k) }
+      missing_params = all_required.reject { |k| params.include?(k) }
       raise("Missing required parameter(s) for %s: %s" % [command, missing_params.join(", ")]) unless missing_params.empty?
 
-      logger = options.delete(:logger) || Logger.new(nil)
       return_value = options.delete(:return_value)
 
       props = (required_params + optional_params).inject({}) do |acc, key|
-        acc[param_key(key)] = wsman_value(key, options[key])
+        acc[Parser.param_key(key)] = Parser.wsman_value(key, params[key]) if params[key]
         acc
       end
 
       unless url_params.empty?
         encoded_arguments = url_params.map do |key|
-          "%s=%s" % [URI.escape(param_key(key)), URI.escape(wsman_value(key, options[key]))]
+          "%s=%s" % [URI.escape(Parser.param_key(key)), URI.escape(Parser.wsman_value(key, params[key]))]
         end.join("&")
         uri = URI(url)
         url = "%s%s%s" % [url, uri.query ? "&" : "?", encoded_arguments]
       end
 
-      resp = invoke(endpoint, command, url, :logger => logger, :props => props)
-      ret = parse(resp)
-      raise(ResponseError.new("%s failed" % command, ret)) if return_value && ret[:return_value] != return_value
+      resp = invoke(command, url, :props => props)
+      ret = Parser.parse(resp)
+      if return_value && !Array(return_value).include?(ret[:return_value])
+        raise(ASM::ResponseError.new("%s failed" % command, ret))
+      end
       ret
     end
 
@@ -559,12 +440,12 @@ module ASM
     # @option options [String] :hash_value checksum value in string format computed using HashType algorithm
     # @option options [String] :auto_connect auto-connect to ISO image up on iDRAC reset
     # @return [Hash]
-    # @raise [ResponseError] if the command fails
-    def self.osd_deployment_invoke_iso(endpoint, command, options={})
-      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
-                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
-                              :return_value => "4096")
-      invoke_service(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, options)
+    # @raise [ASM::ResponseError] if the command fails
+    def osd_deployment_invoke_iso(command, params={})
+      invoke_service(command, DEPLOYMENT_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :share_type, :image_name],
+                     :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                     :return_value => "4096")
     end
 
     # Reboot server to a network ISO
@@ -572,12 +453,12 @@ module ASM
     # @note {detach_iso_image} should be called once the ISO is no longer needed.
     # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
-    # @raise [ResponseError] if the command fails
-    def self.boot_to_network_iso_command(endpoint, options={})
-      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
-                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
-                              :return_value => "4096")
-      invoke_service(endpoint, "BootToNetworkISO", DEPLOYMENT_SERVICE_SCHEMA, options)
+    # @raise [ASM::ResponseError] if the command fails
+    def boot_to_network_iso_command(params={})
+      invoke_service("BootToNetworkISO", DEPLOYMENT_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :share_type, :image_name],
+                     :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                     :return_value => "4096")
     end
 
     # Connect a network ISO as a virtual CD-ROM
@@ -590,12 +471,12 @@ module ASM
     # @note {disconnect_network_iso_image} should be called as soon as the ISO is not needed.
     # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
-    # @raise [ResponseError] if the command fails
-    def self.connect_network_iso_image_command(endpoint, options={})
-      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
-                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
-                              :return_value => "4096")
-      invoke_service(endpoint, "ConnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
+    # @raise [ASM::ResponseError] if the command fails
+    def connect_network_iso_image_command(params={})
+      invoke_service("ConnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :share_type, :image_name],
+                     :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                     :return_value => "4096")
     end
 
     # Connect a network ISO from a remote file system
@@ -608,24 +489,12 @@ module ASM
     # @note {disconnect_rfs_iso_image} should be called as soon as the ISO is not needed.
     # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
     # @param options [Hash] the ISO parameters. See {osd_deployment_invoke_iso} options hash.
-    # @raise [ResponseError] if the command fails
-    def self.connect_rfs_iso_image_command(endpoint, options={})
-      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
-                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
-                              :return_value => "4096")
-      invoke_service(endpoint, "ConnectRFSISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
-    end
-
-    # Invoke a DCIM_DeploymentService command
-    #
-    # @api private
-    # @param endpoint [Hash] the server connection details. See {invoke} endpoint hash.
-    # @param command [String]
-    # @param options [Hash]
-    # @option options [String] :return_value Expected ws-man return_value. An exception will be raised if this is not returned.
-    # @return [Hash]
-    def self.deployment_invoke(endpoint, command, options={})
-      invoke_service(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, options)
+    # @raise [ASM::ResponseError] if the command fails
+    def connect_rfs_iso_image_command(params={})
+      invoke_service("ConnectRFSISOImage", DEPLOYMENT_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :share_type, :image_name],
+                     :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                     :return_value => "4096")
     end
 
     # Detach an ISO that was mounted with {boot_to_network_iso_command}
@@ -634,14 +503,13 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.detach_iso_image(endpoint, options={})
-      options = options.merge(:return_value => "0")
-      invoke_service(endpoint, "DetachISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
+    def detach_iso_image
+      invoke_service("DetachISOImage", DEPLOYMENT_SERVICE_SCHEMA, :return_value => "0")
     end
 
     # @deprecated Use {detach_iso_image} instead.
     def self.detach_network_iso(endpoint, logger=nil)
-      detach_iso_image(endpoint, :logger => logger)
+      ASM::WsMan.new(endpoint, :logger => logger).detach_iso_image
     end
 
     # Disconnect an ISO that was mounted with {connect_network_iso_image_command}
@@ -650,9 +518,8 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.disconnect_network_iso_image(endpoint, options={})
-      options = options.merge(:return_value => "0")
-      invoke_service(endpoint, "DisconnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
+    def disconnect_network_iso_image
+      invoke_service("DisconnectNetworkISOImage", DEPLOYMENT_SERVICE_SCHEMA, :return_value => "0")
     end
 
     # Disconnect an ISO that was mounted with {connect_rfs_iso_image_command}
@@ -661,9 +528,12 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.disconnect_rfs_iso_image(endpoint, options={})
-      options = options.merge(:return_value => "0")
-      invoke_service(endpoint, "DisconnectRFSISOImage", DEPLOYMENT_SERVICE_SCHEMA, options)
+    def disconnect_rfs_iso_image
+      invoke_service("DisconnectRFSISOImage", DEPLOYMENT_SERVICE_SCHEMA, :return_value => "0")
+    end
+
+    def get_rfs_iso_image_connection_info
+      invoke_service("GetRFSISOImageConnectionInfo", DEPLOYMENT_SERVICE_SCHEMA)
     end
 
     # Get current drivers and ISO connection status
@@ -682,8 +552,8 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.get_attach_status(endpoint, options={})
-      invoke_service(endpoint, "GetAttachStatus", DEPLOYMENT_SERVICE_SCHEMA, options)
+    def get_attach_status
+      invoke_service("GetAttachStatus", DEPLOYMENT_SERVICE_SCHEMA)
     end
 
     # Get ISO image connection info
@@ -701,8 +571,12 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.get_network_iso_image_connection_info(endpoint, options={})
-      invoke_service(endpoint, "GetNetworkISOConnectionInfo", DEPLOYMENT_SERVICE_SCHEMA, options)
+    def get_network_iso_image_connection_info
+      invoke_service("GetNetworkISOConnectionInfo", DEPLOYMENT_SERVICE_SCHEMA)
+    end
+
+    def get(url, instance_id)
+      invoke_service("get", url, :params => {:instance_id => instance_id}, :url_params => :instance_id)
     end
 
     # Get deployment job status
@@ -718,12 +592,9 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.get_deployment_job(endpoint, job, options={})
-      url = "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_OSDConcreteJob?InstanceID=%s" % job
-      parse(invoke(endpoint, "get", url, :logger => options[:logger]))
+    def get_deployment_job(job)
+      get("http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_OSDConcreteJob", job)
     end
-
-    class RetryException < StandardError; end
 
     # Check the deployment job status until it is complete or times out
     #
@@ -732,20 +603,42 @@ module ASM
     # @param options [Hash]
     # @option options [Logger] :logger
     # @return [Hash]
-    def self.poll_deployment_job(endpoint, job, options={})
-      options = {:logger => Logger.new(nil), :timeout => 600}.merge(options)
+    def poll_deployment_job(job, options={})
+      options = {:timeout => 600}.merge(options)
       max_sleep_secs = 60
       resp = ASM::Util.block_and_retry_until_ready(options[:timeout], RetryException, max_sleep_secs) do
-        resp = get_deployment_job(endpoint, job, :logger => options[:logger])
+        resp = get_deployment_job(job)
         unless %w(Success Failed).include?(resp[:job_status])
-          options[:logger].info("%s status on %s: %s" % [job, endpoint[:host], response_string(resp)])
+          logger.info("%s status on %s: %s" % [job, host, Parser.response_string(resp)])
           raise(RetryException)
         end
         resp
       end
+      raise(ASM::ResponseError.new("Deployment job %s failed" % job, resp)) unless resp[:job_status] == "Success"
       resp
     rescue Timeout::Error
-      raise(Error, "Timed out waiting for job %s to complete. Final status: %s" % [job, response_string(resp)])
+      raise(Error, "Timed out waiting for job %s to complete. Final status: %s" % [job, Parser.response_string(resp)])
+    end
+
+    def get_lc_job(job)
+      get("http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_LifecycleJob", job)
+    end
+
+    def poll_lc_job(job, options={})
+      options = {:timeout => 600}.merge(options)
+      max_sleep_secs = 60
+      resp = ASM::Util.block_and_retry_until_ready(options[:timeout], RetryException, max_sleep_secs) do
+        resp = get_lc_job(job)
+        unless resp[:percent_complete] == "100" || resp[:job_status] =~ /complete/i
+          logger.info("%s status on %s: %s" % [job, host, Parser.response_string(resp)])
+          raise(RetryException)
+        end
+        resp
+      end
+      raise(ASM::ResponseError.new("LC job %s failed" % job, resp)) unless resp[:job_status] =~ /complete/i
+      resp
+    rescue Timeout::Error
+      raise(Error, "Timed out waiting for job %s to complete. Final status: %s" % [job, Parser.response_string(resp)])
     end
 
     # Execute a deployment ISO mount command and await job completion.
@@ -757,23 +650,21 @@ module ASM
     # @option options [Logger] :logger
     # @option options [FixNum] :timeout (5 minutes)
     # @return [Hash]
-    def self.run_deployment_job(endpoint, command, options={})
+    def run_deployment_job(command, options={})
       options = {:timeout => 5 * 60}.merge(options)
-      logger = options[:logger] || Logger.new(nil)
 
       # LC must be ready for deployment jobs to succeed
-      poll_for_lc_ready(endpoint, :logger => logger)
+      poll_for_lc_ready
 
-      logger.info("Invoking %s with ISO %s on %s" % [command, options[:image_name], endpoint[:host]])
-      options = options.merge(:required_params => [:ip_address, :share_name, :share_type, :image_name],
-                              :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
-                              :return_value => "4096")
-      resp = invoke_service(endpoint, command, DEPLOYMENT_SERVICE_SCHEMA, options)
+      logger.info("Invoking %s with ISO %s on %s" % [command, options[:image_name], host])
+      resp = invoke_service(command, DEPLOYMENT_SERVICE_SCHEMA, :params => options,
+                            :required_params => [:ip_address, :share_name, :share_type, :image_name],
+                            :optional_params => [:workgroup, :user_name, :password, :hash_type, :hash_value, :auto_connect],
+                            :return_value => "4096")
 
-      logger.info("Initiated %s job %s on %s" % [command, resp[:job], endpoint[:host]])
-      resp = poll_deployment_job(endpoint, resp[:job], options)
-      raise(ResponseError.new("%s job %s failed" % [command, resp[:job]], resp)) unless resp[:job_status] == "Success"
-      logger.info("%s succeeded with ISO %s on %s: %s" % [command, options[:image_name], endpoint[:host], response_string(resp)])
+      logger.info("Initiated %s job %s on %s" % [command, resp[:job], host])
+      resp = poll_deployment_job(resp[:job], :timeout => options[:timeout])
+      logger.info("%s succeeded with ISO %s on %s: %s" % [command, options[:image_name], host, Parser.response_string(resp)])
     end
 
     # Connect network ISO image and await job completion
@@ -784,9 +675,21 @@ module ASM
     # @option options [Logger] :logger
     # @option options [FixNum] :timeout (5 minutes)
     # @return [Hash]
-    def self.connect_network_iso_image(endpoint, options={})
+    def connect_network_iso_image(options={})
       options = {:timeout => 90}.merge(options)
-      run_deployment_job(endpoint, "ConnectNetworkISOImage", options)
+      run_deployment_job("ConnectNetworkISOImage", options)
+    end
+
+    def connect_rfs_iso_image(options={})
+      options = {:timeout => 90}.merge(options)
+      resp = get_rfs_iso_image_connection_info
+      if resp[:return_value] == "0"
+        logger.info("Disconnecting old RFS ISO %s from %s" % [resp[:file_path], host])
+        disconnect_rfs_iso_image
+      end
+
+      logger.info("Connecting RFS ISO %s to %s" % [options[:image_name], host])
+      run_deployment_job("ConnectRFSISOImage", options)
     end
 
     # Boot to network ISO image and await job completion
@@ -796,9 +699,9 @@ module ASM
     # @option options [Logger] :logger
     # @option options [FixNum] :timeout (5 minutes)
     # @return [Hash]
-    def self.boot_to_network_iso_image(endpoint, options={})
+    def boot_to_network_iso_image(options={})
       options = {:timeout => 15 * 60}.merge(options)
-      run_deployment_job(endpoint, "BootToNetworkISO", options)
+      run_deployment_job("BootToNetworkISO", options)
     end
 
     # @deprecated Use {boot_to_network_iso_image} instead.
@@ -808,7 +711,7 @@ module ASM
                  :share_name => share_name,
                  :share_type => :nfs,
                  :logger => logger}
-      boot_to_network_iso_image(endpoint, options)
+      ASM::WsMan.new(endpoint, :logger => logger).boot_to_network_iso_image(options)
     end
 
     # Wait for LC to be ready to accept new jobs
@@ -822,35 +725,36 @@ module ASM
     # @option options [Logger] :logger
     # @option options [FixNum] :timeout (5 minutes)
     # @return [Hash]
-    def self.poll_for_lc_ready(endpoint, options={})
-      resp = get_lc_status(endpoint, :logger => options[:logger])
+    def poll_for_lc_ready(options={})
+      options = {:timeout => 5 * 60}.merge(options)
+
+      resp = get_lc_status
       return if resp[:lcstatus] == "0"
 
       # If ConnectNetworkISOImage has been executed, LC will be locked until the image is disconnected.
-      resp = get_network_iso_image_connection_info(endpoint, :logger => logger)
-      disconnect_network_iso_image(endpoint, options) if resp["image_name"]
+      resp = get_network_iso_image_connection_info
+      disconnect_network_iso_image if resp["image_name"]
 
       # Similarly, if BootToNetworkISO has been executed, LC will be locked until
       # the image is attached. Note that GetAttachStatus will return 1 both for
       # BootToNetworkISO and ConnectNetworkISOImage so it is important to check
       # ConnectNetworkISOImage first.
-      resp = get_attach_status(endpoint, options)
-      detach_iso_image(endpoint, options) if resp["iso_attach_status"] == "1"
+      resp = get_attach_status
+      detach_iso_image if resp["iso_attach_status"] == "1"
 
-      options = {:logger => Logger.new(nil), :timeout => 5 * 60}.merge(options)
       max_sleep_secs = 60
       resp = ASM::Util.block_and_retry_until_ready(options[:timeout], RetryException, max_sleep_secs) do
-        resp = get_lc_status(endpoint, :logger => options[:logger])
+        resp = get_lc_status
         unless resp[:lcstatus] == "0"
-          options[:logger].info("LC status on %s: %s" % [endpoint[:host], response_string(resp)])
+          logger.info("LC status on %s: %s" % [host, Parser.response_string(resp)])
           raise(RetryException)
         end
         resp
       end
-      options[:logger].info("LC services are ready on %s" % endpoint[:host])
+      logger.info("LC services are ready on %s" % host)
       resp
     rescue Timeout::Error
-      raise(Error, "Timed out waiting for LC. Final status: %s" % response_string(resp))
+      raise(Error, "Timed out waiting for LC. Final status: %s" % Parser.response_string(resp))
     end
 
     # @deprecated Use {poll_for_lc_ready} instead.
@@ -873,31 +777,172 @@ module ASM
       60
     end
 
-    def self.enumerate(endpoint, url, options={})
-      content = invoke(endpoint, "enumerate", url, :logger => options[:logger])
-      resp = parse_enumeration(content)
+    def enumerate(url, options={})
+      content = invoke("enumerate", url, :logger => options[:logger])
+      resp = Parser.parse_enumeration(content)
       if resp.is_a?(Hash)
         klazz = URI.parse(url).split("/").last
-        raise(ResponseError.new("%s enumeration failed" % klazz, resp))
+        raise(ASM::ResponseError.new("%s enumeration failed" % klazz, resp))
       end
       resp
     end
 
-    def self.get_boot_config_settings(endpoint, options={})
-      enumerate(endpoint, "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting?__cimnamespace=root/dcim", options)
+    def get_boot_config_settings
+      enumerate("http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting?__cimnamespace=root/dcim")
     end
 
-    def self.get_boot_source_settings(endpoint, options={})
-      enumerate(endpoint, "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootSourceSetting?__cimnamespace=root/dcim", options)
+    def get_boot_source_settings
+      enumerate("http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootSourceSetting?__cimnamespace=root/dcim")
     end
 
-    def self.create_targeted_config_job(endpoint, options={})
-      invoke_service(endpoint, BIOS_SERVICE_SCHEMA, "CreateTargetedConfigJob", options)
+    def set_attributes(params={})
+      invoke_service("SetAttributes", BIOS_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:target, :attribute_name, :attribute_value],
+                     :return_value => "0")
     end
 
-    def self.change_boot_source_state(endpoint, options={})
-      options = options.merge(:required_params => [:enabled_state, :source], :url_params => :instance_id, :return_value => "4096")
-      invoke_service(endpoint, "ChangeBootSourceState", "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting", options)
+    def create_targeted_config_job(params={})
+      invoke_service("CreateTargetedConfigJob", BIOS_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:target],
+                     :optional_params => [:reboot_job_type, :scheduled_start_time, :until_time],
+                     :return_value => "4096")
+    end
+
+    def change_boot_source_state(params={})
+      invoke_service("ChangeBootSourceState",
+                     "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting",
+                     :params => params, :required_params => [:enabled_state, :source],
+                     :url_params => :instance_id,
+                     :return_value => "0")
+    end
+
+    def change_boot_order_by_instance_id(params={})
+      invoke_service("ChangeBootOrderByInstanceID",
+                     "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_BootConfigSetting",
+                     :params => params, :required_params => :source,
+                     :url_params => :instance_id,
+                     :return_value => ["0", "4096"])
+    end
+
+    # NOTE: forces Bios boot (not uefi)
+    def set_boot_order(boot_device, options={})
+      boot_order_map = {:hdd => "Hard drive C: BootSeq", :virtual_cd => "Virtual Optical Drive BootSeq"}
+      boot_device = Parser.enum_value("BootDevice", boot_order_map,
+                                      boot_device, :strict => false)
+      options = {:scheduled_start_time => "TIME_NOW",
+                 :reboot_job_type => :graceful_with_forced_shutdown}.merge(options)
+
+      logger.info("Waiting for LC ready on %s" % host)
+      poll_for_lc_ready
+      bios_enumerations = get_bios_enumeration
+      boot_mode = bios_enumerations.find { |e| e[:attribute_name] == "BootMode" }
+      raise("BootMode not found") unless boot_mode
+
+      unless boot_mode[:current_value] == "Bios"
+        # Set back to bios boot mode
+        logger.info("Current boot mode on %s is %s, resetting to Bios BootMode" %
+                        [host, boot_mode[:current_value]])
+        set_attributes(:target => boot_mode[:fqdd], :attribute_name => "BootMode",
+                       :attribute_value => "Bios")
+        resp = create_targeted_config_job(:target => boot_mode[:fqdd],
+                                          :scheduled_start_time => "TIME_NOW",
+                                          :reboot_job_type => :graceful_with_forced_shutdown)
+        logger.info("Initiated BIOS config job %s on %s" % [resp[:job], host])
+        resp = poll_lc_job(resp[:job])
+        logger.info("Successfully set BootMode to Bios on %s: %s" % [host, Parser.response_string(resp)])
+        logger.info("Waiting for LC ready on %s" % host)
+        poll_for_lc_ready
+      end
+
+      boot_settings = get_boot_source_settings
+      target = boot_settings.find { |e| e[:element_name] == boot_device }
+      unless target
+        raise("Could not find %s boot device in current list: %s" %
+                  [boot_device, boot_settings.map { |e| e[:element_name] }.join(", ")])
+      end
+
+      if target[:current_assigned_sequence] == "0" && target[:current_enabled_status] == "1"
+        logger.info("%s is already configured to boot from %s" % [host, target[:element_name]])
+        return
+      end
+
+      change_boot_order_by_instance_id(:instance_id => "IPL",
+                                       :source => target[:instance_id])
+      change_boot_source_state(:instance_id => "IPL", :enabled_state => 1,
+                               :source => target[:instance_id])
+      resp = create_targeted_config_job(:target => boot_mode[:fqdd],
+                                        :scheduled_start_time => options[:scheduled_start_time],
+                                        :reboot_job_type => options[:reboot_job_type])
+      logger.info("Initiated BIOS config job %s on %s" % [resp[:job], host])
+      resp = poll_lc_job(resp[:job])
+      logger.info("Successfully set %s to first in boot order on %s: %s" %
+                      [target[:element_name], host, Parser.response_string(resp)])
+      logger.info("Waiting for LC ready on %s" % host)
+      poll_for_lc_ready
+    end
+
+    def boot_rfs_iso_image(options={})
+      options = {:reboot_job_type => :graceful_with_forced_shutdown,
+                 :reboot_start_time => "TIME_NOW"}.merge(options)
+      connect_rfs_iso_image(options)
+
+      # Have to reboot in order for virtual cd to show up in boot source settings
+      reboot(options)
+
+      # Wait for virtual cd to show up in boot source settings
+      timeout = 10 * 60
+      max_sleep = 60
+      virtual_cd_name = "Virtual Optical Drive BootSeq"
+      ASM::Util.block_and_retry_until_ready(timeout, RetryException, max_sleep) do
+        boot_settings = get_boot_source_settings
+        found = boot_settings.find { |e| e[:element_name] == virtual_cd_name }
+        raise(RetryException) unless found
+      end
+
+      set_boot_order(:virtual_cd)
+
+    rescue Timeout::Error
+      raise(Error, "Timed out waiting for %s to become available on %s" % [virtual_cd_name, host])
+    end
+
+    def import_system_configuration(params={})
+      invoke_service("ImportSystemConfiguration", LC_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :file_name, :share_type],
+                     :optional_params => [:target, :shutdown_type, :end_host_power_state, :username, :password],
+                     :return_value => "4096")
+    end
+
+    def import_system_configuration_job(params={})
+      poll_for_lc_ready
+      resp = import_system_configuration(params)
+      poll_lc_job(resp[:job], :timeout => 30 * 60)
+    end
+
+    def export_system_configuration(params={})
+      invoke_service("ExportSystemConfiguration", LC_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :file_name, :share_type],
+                     :optional_params => [:username, :password, :workgroup, :target, :export_use, :include_in_export],
+                     :return_value => "4096")
+    end
+
+    def export_system_configuration_job(params={})
+        poll_for_lc_ready
+      resp = export_system_configuration(params)
+      poll_lc_job(resp[:job], :timeout => 5 * 60)
+    end
+
+    def export_complete_lc_log(params={})
+      invoke_service("ExportLCLog", LC_SERVICE_SCHEMA, :params => params,
+                     :required_params => [:ip_address, :share_name, :file_name, :share_type],
+                     :optional_params => [:username, :password, :workgroup],
+                     :return_value => "4096")
+    end
+
+    def get_config_results(params={})
+      invoke_service("GetConfigResults", "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_LCRecordLog?__cimnamespace=root/dcim",
+                     :params => params,
+                     :optional_params => [:instance_id, :job_id],
+                     :return_value => "0")
     end
   end
 end

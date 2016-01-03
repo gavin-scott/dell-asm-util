@@ -396,4 +396,15 @@ describe ASM::WsMan do
       ASM::WsMan.boot_to_network_iso_image(endpoint, {})
     end
   end
+
+  describe "#get_config_results" do
+    it "should call invoke_service" do
+      wsman = ASM::WsMan.new(endpoint, :logger => logger)
+      wsman.expects(:invoke_service).with("GetConfigResults", "http://schemas.dell.com/wbem/wscim/1/cim-schema/2/DCIM_LCRecordLog?__cimnamespace=root/dcim",
+                                          :params => {:rspec_arg => "rspec_val"},
+                                          :optional_params => [:instance_id, :job_id],
+                                          :return_value => "0").returns("rspec-response")
+      expect(wsman.get_config_results(:rspec_arg => "rspec_val")).to eq("rspec-response")
+    end
+  end
 end
