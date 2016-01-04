@@ -220,7 +220,7 @@ describe ASM::WsMan do
 
   describe "#detach_iso_image" do
     it "should invoke DetachISOImage" do
-      ASM::WsMan.expects(:invoke_service).with(endpoint, "DetachISOImage", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA,
+      ASM::WsMan.expects(:invoke_service).with(endpoint, "DetachISOImage", ASM::WsMan::DEPLOYMENT_SERVICE,
                                                :return_value => "0", :logger => logger)
       ASM::WsMan.detach_iso_image(endpoint, :logger => logger)
     end
@@ -228,7 +228,7 @@ describe ASM::WsMan do
 
   describe "#disconnect_network_iso_image" do
     it "should invoke DisconnectNetworkISOImage" do
-      ASM::WsMan.expects(:invoke_service).with(endpoint, "DisconnectNetworkISOImage", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA,
+      ASM::WsMan.expects(:invoke_service).with(endpoint, "DisconnectNetworkISOImage", ASM::WsMan::DEPLOYMENT_SERVICE,
                                                :return_value => "0", :logger => logger)
       ASM::WsMan.disconnect_network_iso_image(endpoint, :logger => logger)
     end
@@ -236,7 +236,7 @@ describe ASM::WsMan do
 
   describe "#get_attach_status" do
     it "should invoke GetAttachStatus" do
-      ASM::WsMan.expects(:invoke_service).with(endpoint, "GetAttachStatus", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA,
+      ASM::WsMan.expects(:invoke_service).with(endpoint, "GetAttachStatus", ASM::WsMan::DEPLOYMENT_SERVICE,
                                                :logger => logger)
       ASM::WsMan.get_attach_status(endpoint, :logger => logger)
     end
@@ -363,7 +363,7 @@ describe ASM::WsMan do
     before(:each) do
       ASM::WsMan.expects(:poll_for_lc_ready).with(endpoint, :logger => logger)
       ASM::WsMan.expects(:invoke_service)
-        .with(endpoint, "BootToNetworkISO", ASM::WsMan::DEPLOYMENT_SERVICE_SCHEMA, invoke_options)
+        .with(endpoint, "BootToNetworkISO", ASM::WsMan::DEPLOYMENT_SERVICE, invoke_options)
         .returns(:job => "rspec-job", :job_status => "Started")
     end
 

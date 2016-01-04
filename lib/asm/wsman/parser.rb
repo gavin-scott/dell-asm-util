@@ -189,7 +189,6 @@ module ASM
         ret = "%s [%s]" % [message, ret] if message
         ret
       end
-
     end
   end
 end
