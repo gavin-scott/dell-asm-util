@@ -28,6 +28,7 @@ module ASM
       def augment_logger(logger)
         if !logger.respond_to?(:error) && logger.respond_to?(:err)
           # Puppet logger has most Logger methods, but uses err and warning
+          # rubocop:disable Lint/NestedMethodDefinition
           def logger.error(msg)
             err(msg)
           end
@@ -35,6 +36,7 @@ module ASM
           def logger.warn(msg)
             warning(msg)
           end
+          # rubocop:enable Lint/NestedMethodDefinition
         end
         logger
       end
@@ -65,11 +67,11 @@ module ASM
           :nth_attempt => 0
         }.merge(options)
 
-        if %w(enumerate get).include?(method)
-          args = [method, schema]
-        else
-          args = ["invoke", "-a", method, schema]
-        end
+        args = if %w(enumerate get).include?(method)
+                 [method, schema]
+               else
+                 ["invoke", "-a", method, schema]
+               end
 
         args += ["-h", host,
                  "-V", "-v", "-c", "dummy.cert", "-P", "443",
