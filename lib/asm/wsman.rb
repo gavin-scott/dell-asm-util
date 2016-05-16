@@ -891,6 +891,32 @@ module ASM
                     :return_value => "4096")
     end
 
+    def export_system_configuration(params={})
+      options = {:timeout => 30 * 60}.merge(params)
+      poll_for_lc_ready(options)
+      logger.info("Exporting system configuration on %s" % host)
+      resp = export_system_configuration_command(options)
+      logger.info("Waiting for export system configuration job %s to complete on %s" % [resp[:job], host])
+      poll_lc_job(resp[:job], :timeout => options[:timeout])
+      logger.info("Successfully exported system configuration for %s" % host)
+      poll_for_lc_ready(options)
+      nil
+    end
+
+    def import_system_configuration(params={})
+      options = {:timeout => 30 * 60}.merge(params)
+      poll_for_lc_ready(options)
+      logger.info("Importing system configuration on %s" % host)
+      resp = import_system_configuration_command(options)
+      logger.info("Waiting for import system configuration job %s to complete on %s" % [resp[:job], host])
+      job_resp = poll_lc_job(resp[:job], :timeout => options[:timeout])
+      # TODO: need to check whether it was Completed with Errors and retry if so
+      logger.info("Imported system configuration for %s status %s" % [host, job_resp])
+      sleep(30)
+      poll_for_lc_ready(options)
+      nil
+    end
+
     # Export server LC log to a remote file share.
     #
     # @param params [Hash]
@@ -1269,8 +1295,10 @@ module ASM
 
       change_boot_order_by_instance_id(:instance_id => "IPL",
                                        :source => target[:instance_id])
-      change_boot_source_state(:instance_id => "IPL", :enabled_state => "1",
-                               :source => target[:instance_id])
+      unless target[:current_enabled_status] == "1"
+        change_boot_source_state(:instance_id => "IPL", :enabled_state => "1",
+                                 :source => target[:instance_id])
+      end
       run_bios_config_job(:target => boot_mode[:fqdd],
                           :scheduled_start_time => options[:scheduled_start_time],
                           :reboot_job_type => options[:reboot_job_type])
@@ -1311,8 +1339,14 @@ module ASM
                  :timeout => 10 * 60}.merge(options)
       connect_rfs_iso_image(options)
 
-      # Have to reboot in order for virtual cd to show up in boot source settings
-      reboot(options)
+      # In attach mode the virtual CD should always be listed (but may not be backed by an ISO)
+      # In detach mode we're screwed! (TODO: ensure either attach or auto-attach)
+      # TODO: is it ok not to reboot if it's auto-attach and we've changed the ISO?
+      unless find_boot_device(:virtual_cd)
+        # In auto-attach mode have to reboot in order for virtual CD to show up in boot source settings.
+        logger.info("Virtual CD not seen for %s, rebooting" % host)
+        reboot(options)
+      end
 
       # Wait for virtual cd to show up in boot source settings
       max_sleep = 60
