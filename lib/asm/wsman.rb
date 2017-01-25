@@ -1103,20 +1103,28 @@ module ASM
     #
     # @return [void]
     # @raise [ResponseError] if the command fails
-    def power_off
+    def power_off(requested_state=:graceful)
       # Create the reboot job
-      logger.debug("Power off server %s" % host)
+      logger.debug("Power off server %s requested state = %s" % [host, requested_state])
 
       if power_state != :off
-        set_power_state(:requested_state => :off)
-        (1..30).each do |wait_counter|
+        set_power_state(:requested_state => requested_state)
+        (1..60).each do |wait_counter|
           break if power_state == :off
-          logger.debug "Server is not in power-off state. Retry counter %d" % wait_counter if logger
+          logger.debug "Server %s is not in power-off state. Retry counter %d" % [host, wait_counter] if logger
           sleep 10
         end
-        logger.warn "Server is still not powered-off. Check the server console" if power_state != :off
+
+        return if power_state == :off
+
+        if requested_state == :graceful
+          logger.warn "Server %s is still not powered-off after graceful shutdown, initiating forced shutdown." % host
+          power_off(:forced)
+        else
+          logger.warn "Server %s is still not powered-off. Check the server console" % host
+        end
       else
-        logger.debug "Server is already powered off"
+        logger.debug "Server %s is already powered off" % host
       end
     end
 

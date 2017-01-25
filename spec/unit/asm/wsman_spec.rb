@@ -449,13 +449,27 @@ describe ASM::WsMan do
       wsman.stubs(:sleep)
       wsman.expects(:power_state).times(4).returns(:on, :on, :off, :off)
       wsman.expects(:set_power_state).with(:requested_state => :off)
-      wsman.power_off
+      wsman.power_off(:off)
     end
 
     it "should do nothing if it is already off" do
       wsman.expects(:power_state).returns(:off)
       wsman.expects(:set_power_state).never
-      wsman.power_off
+      wsman.power_off(:off)
+    end
+
+    it "should check power state up to 62 times and then give up for forced shutdown" do
+      wsman.stubs(:sleep)
+      wsman.expects(:power_state).times(62).returns(:on)
+      wsman.expects(:set_power_state).with(:requested_state => :forced)
+      wsman.power_off(:forced)
+    end
+
+    it "should do a forced shutdown if graceful shutdown times out" do
+      wsman.stubs(:sleep)
+      wsman.expects(:power_state).times(124).returns(Array.new(62) { :off } + [:on] )
+      wsman.expects(:set_power_state).with(:requested_state => :forced)
+      wsman.power_off(:forced)
     end
   end
 
