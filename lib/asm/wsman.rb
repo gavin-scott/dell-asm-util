@@ -1398,13 +1398,14 @@ module ASM
 
     # Find the specified boot device in {#boot_source_settings}
     #
-    # @param [Symbol|String] :hdd for "Hard drive C", :virtual_cd for "Virtual Optical Drive" or the device FQDD such as
+    # @param [Symbol|String] :hdd for "Hard drive C", :virtual_cd for "Virtual Optical Drive",
+    #                         :virtual_floppy for "Virtual Floppy Drive" or the device FQDD such as
     #                        HardDisk.List.1-1, Optical.iDRACVirtual.1-1 or NIC.Slot.2-2-1
     # @return [Hash] the boot device, or nil if not found
     # @raise [ResponseError] if a command fails
     def find_boot_device(boot_device)
       boot_settings = boot_source_settings
-      boot_order_map = {:hdd => "HardDisk.List.1-1", :virtual_cd => "Optical.iDRACVirtual.1-1"}
+      boot_order_map = {:hdd => "HardDisk.List.1-1", :virtual_cd => "Optical.iDRACVirtual.1-1", :virtual_floppy => "Floppy.iDRACVirtual.1-1"}
       boot_device = Parser.enum_value("BootDevice", boot_order_map,
                                       boot_device, :strict => false)
       boot_settings.find { |e| e[:instance_id].include?("#%s#" % boot_device) }
@@ -1417,6 +1418,7 @@ module ASM
     #
     # @param [Symbol|String] :hdd for "Hard drive C", :virtual_cd for "Virtual Optical Drive" or the device name itself
     # @param options [Hash]
+    # @option params [String] :boot_mode :bios (default) or :uefi
     # @option params [String] :reboot_job_type "1" or :power_cycle, "2" or :graceful, or "3" or :graceful_with_forced_shutdown
     # @option params [String] :scheduled_start_time Schedules the "configuration job" and the optional "reboot job"
     #                         at the specified start time in the format: yyyymmddhhmmss. A special value of
@@ -1424,20 +1426,24 @@ module ASM
     # @return [void]
     # @raise [ResponseError] if a command fails
     def set_boot_order(boot_device, options={})
-      options = {:scheduled_start_time => "TIME_NOW",
+      options = {:boot_mode => :bios,
+                 :scheduled_start_time => "TIME_NOW",
                  :reboot_job_type => :graceful_with_forced_shutdown}.merge(options)
+
+      raise(ArgumentError, "Invalid boot mode: %s" % options[:boot_mode]) unless [:bios, :uefi].include?(options[:boot_mode])
 
       logger.info("Waiting for LC ready on %s" % host)
       poll_for_lc_ready
       boot_mode = bios_enumerations.find { |e| e[:attribute_name] == "BootMode" }
       raise("BootMode not found") unless boot_mode
 
-      unless boot_mode[:current_value] == "Bios"
-        # Set back to bios boot mode
-        logger.info("Current boot mode on %s is %s, resetting to Bios BootMode" %
-                        [host, boot_mode[:current_value]])
+      desired_mode = options[:boot_mode].to_s.capitalize
+      unless boot_mode[:current_value] == desired_mode
+        # Set back to requested boot mode
+        logger.info("Current boot mode on %s is %s, resetting to %s BootMode" %
+                        [host, boot_mode[:current_value], desired_mode])
         set_bios_attributes(:target => boot_mode[:fqdd], :attribute_name => "BootMode",
-                            :attribute_value => "Bios")
+                            :attribute_value => desired_mode)
       end
 
       target = find_boot_device(boot_device)
@@ -1451,12 +1457,13 @@ module ASM
         return
       end
 
-      change_boot_order_by_instance_id(:instance_id => "IPL",
+      boot_source_type = options[:boot_mode] == :uefi ? "UEFI" : "IPL"
+      change_boot_order_by_instance_id(:instance_id => boot_source_type,
                                        :source => target[:instance_id])
 
       unless target[:current_enabled_status] == "1"
         logger.info("Enabling boot device %s on %s" % [target[:instance_id], host])
-        change_boot_source_state(:instance_id => "IPL", :enabled_state => "1",
+        change_boot_source_state(:instance_id => boot_source_type, :enabled_state => "1",
                                  :source => target[:instance_id])
       end
 
